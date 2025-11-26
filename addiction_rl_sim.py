@@ -28,7 +28,8 @@ assert len(STATE_AFTEREFFECTS) == 14, "Aftereffect span must match 14 states (pa
 assert STATE_AW_SPECIAL in STATE_AFTER_SET, "Special aw state must fall inside aftereffect range."
 DISCOUNT = 0.9
 ALPHA_MF = 0.05
-MB_DECAY = 0.01
+MB_DECAY = 0.01  # decay applied to MB Q-values each planning step
+MB_LEARNING_RATE = 0.2
 EPSILON = 0.1
 N_PRIORITIZED_SWEEPS = 50
 R_G = 1.0
@@ -222,11 +223,11 @@ class HybridAgent:
 
     def _plan_q_values(self):
         # 有界合理性: 各ステップで優先度付きスイーピングを実行後リセット
-        self.q_mb.fill(0.0)
+        self.q_mb *= (1.0 - MB_DECAY)
         visited_pairs = np.argwhere(self.model_visits > 0)
         if visited_pairs.size == 0:
             return
-        best_next = np.zeros(NUM_STATES)
+        best_next = np.max(self.q_mb, axis=1)
         priorities = []
         for s, a in visited_pairs:
             total = self.model_visits[s, a]
@@ -243,7 +244,7 @@ class HybridAgent:
             probs = self.model_counts[s, a] / total
             expected_reward = self.model_rewards[s, a] / total
             target = expected_reward + DISCOUNT * np.dot(probs, best_next)
-            self.q_mb[s, a] += MB_DECAY * (target - self.q_mb[s, a])
+            self.q_mb[s, a] += MB_LEARNING_RATE * (target - self.q_mb[s, a])
             best_next = np.max(self.q_mb, axis=1)
 
 

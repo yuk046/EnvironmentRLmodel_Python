@@ -249,60 +249,70 @@ class HybridAgent:
 
 def simulate(
     beta: float,
-    runs: int,
-    rng: np.random.Generator,
+    num_agents: int,
+    num_runs: int,
+    base_seed: int,
     progress_cb=None,
 ) -> float:
     """指定した β で複数エージェントを走らせ、平均的な依存率を返す。"""
     addictions = 0
-    for run_idx in range(runs):
-        env = AddictionEnvironment(rng)
-        agent = HybridAgent(beta, rng)
-        state = env.reset()
-        counts = PhaseResult()
-        for phase_idx, (_, length, _) in enumerate(PHASES):
-            report_points = {
-                1,
-                max(1, length // 2),
-                length,
-            }
-            for step_in_phase in range(length):
-                step_number = step_in_phase + 1
-                if (
-                    progress_cb is not None
-                    and step_number in report_points
-                ):
-                    progress_cb(
-                        beta,
-                        run_idx,
-                        runs,
-                        phase_idx,
-                        step_number,
-                        length,
-                    )
-                action = agent.select_action(state)
-                next_state, reward = env.step(action, phase_idx)
-                agent.observe(state, action, reward, next_state, phase_idx)
-                if phase_idx == 1:
-                    # 中毒フェーズのみ: 報酬ベースでカウント
-                    if next_state == STATE_DRUG and reward > 0:
-                        counts.drug_choices += 1
-                    elif next_state == STATE_GOAL and reward > 0:
-                        counts.healthy_choices += 1
-                state = next_state
-        if counts.drug_choices > counts.healthy_choices:
-            addictions += 1
-    return addictions / runs
+    total_agents = num_agents * num_runs
+    completed = 0
+    for seed_idx in range(num_runs):
+        rng = np.random.default_rng(base_seed + seed_idx)
+        for agent_idx in range(num_agents):
+            env = AddictionEnvironment(rng)
+            agent = HybridAgent(beta, rng)
+            state = env.reset()
+            counts = PhaseResult()
+            for phase_idx, (_, length, _) in enumerate(PHASES):
+                report_points = {1, max(1, length // 2), length}
+                for step_in_phase in range(length):
+                    step_number = step_in_phase + 1
+                    if (
+                        progress_cb is not None
+                        and step_number in report_points
+                    ):
+                        progress_cb(
+                            beta,
+                            seed_idx,
+                            agent_idx,
+                            num_agents,
+                            num_runs,
+                            phase_idx,
+                            step_number,
+                            length,
+                        )
+                    action = agent.select_action(state)
+                    next_state, reward = env.step(action, phase_idx)
+                    agent.observe(state, action, reward, next_state, phase_idx)
+                    if phase_idx == 1:
+                        # 中毒フェーズのみ: 報酬ベースでカウント
+                        if next_state == STATE_DRUG and reward > 0:
+                            counts.drug_choices += 1
+                        elif next_state == STATE_GOAL and reward > 0:
+                            counts.healthy_choices += 1
+                    state = next_state
+            if counts.drug_choices > counts.healthy_choices:
+                addictions += 1
+            completed += 1
+    return addictions / total_agents
 
 
 def main():
     # ---- コマンドライン引数の設定 ----
     parser = argparse.ArgumentParser(description="Hybrid MB/MF addiction simulation")
     parser.add_argument(
-        "--runs",
+        "--num-agents",
         type=int,
-        default=60,
-        help="Number of agents per beta value",
+        default=30,
+        help="Number of agents per seed (same RNG seed)",
+    )
+    parser.add_argument(
+        "--num-runs",
+        type=int,
+        default=2,
+        help="Number of independent seeds to evaluate",
     )
     parser.add_argument(
         "--seed",
@@ -312,22 +322,29 @@ def main():
     )
     args = parser.parse_args()
 
-    rng = np.random.default_rng(args.seed)
     beta_values = [0.0, 0.2, 0.4, 0.6, 0.8, 1.0]
-    runs_per_beta = args.runs
+    num_agents = args.num_agents
+    num_runs = args.num_runs
     plt.figure(figsize=(7, 4))
-    def log_progress(beta, run_idx, total_runs, phase_idx, step_in_phase, phase_len):
+    def log_progress(beta, seed_idx, agent_idx, num_agents_local, num_seeds, phase_idx, step_in_phase, phase_len):
         # 実行状況を標準出力に流す（長時間計算の見える化）
         phase_name = PHASES[phase_idx][0]
         print(
-            f"[progress] beta={beta:.1f} run={run_idx + 1}/{total_runs} "
+            f"[progress] beta={beta:.1f} seed={seed_idx + 1}/{num_seeds} "
+            f"agent={agent_idx + 1}/{num_agents_local} "
             f"phase={phase_name} step={step_in_phase}/{phase_len}",
             flush=True,
         )
 
     rates = []
     for beta in beta_values:
-        rate = simulate(beta, runs_per_beta, rng, log_progress)
+        rate = simulate(
+            beta,
+            num_agents,
+            num_runs,
+            args.seed,
+            log_progress,
+        )
         rates.append(rate * 100)
     for beta, rate in zip(beta_values, rates):
         print(f"beta={beta:.1f} addiction rate={rate:.2f}%")

@@ -517,7 +517,7 @@ def simulate(
                         if phase_idx == 1:
                             if next_state == STATE_DRUG and reward > 0:
                                 counts.drug_choices += 1
-                            elif next_state == STATE_GOAL and reward > 0:
+                            elif state == STATE_GOAL and reward > 0:
                                 counts.healthy_choices += 1
                                 
                         state = next_state
@@ -525,6 +525,9 @@ def simulate(
                 # 依存判定
                 if counts.drug_choices > counts.healthy_choices:
                     addictions += 1
+
+                if debug_episode and seed_idx == 0 and agent_idx == 0 and log_file:
+                    log_file.write(f"Final Counts - Drug Choices: {counts.drug_choices}, Healthy Choices: {counts.healthy_choices}\n")
     finally:
         if log_file:
             log_file.close()
@@ -592,6 +595,7 @@ def main():
             p_name = PHASES[p_idx][0]
             print(f"[Beta={beta:.1f}] Phase: {p_name} Step: {step}/{length}")
 
+    current_seed = args.seed
     for beta in beta_values:
         # デバッグログのファイル名を生成
         debug_txt_path = None
@@ -602,13 +606,14 @@ def main():
             beta,
             args.num_agents,
             args.num_runs,
-            args.seed,
+            current_seed,
             log_progress,
             mb_forget=args.mb_forget,
             debug_episode=args.debug_episode,
             debug_csv_path=args.debug_csv,
             debug_txt_path=debug_txt_path,
         )
+        current_seed += args.num_runs  # 次のBetaではシードをずらす
         rates.append(rate * 100)
         print(f"Result: Beta={beta:.1f} => Addiction Rate={rate*100:.2f}%")
         print("-" * 60)
@@ -619,7 +624,7 @@ def main():
     plt.title(f"Transition to Addiction (N={args.num_agents * args.num_runs})")
     plt.xlabel("Degree of MB Control (Beta)")
     plt.ylabel("Addiction Rate (%)")
-    plt.ylim(-5, 105)
+    plt.ylim(20, 60)
     plt.grid(True, linestyle="--", alpha=0.6)
     plt.legend()
     plt.tight_layout()

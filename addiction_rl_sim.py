@@ -444,11 +444,14 @@ def simulate(
 
     try:
         # Numba内の乱数シード固定 (再現性のため)
-        np.random.seed(base_seed)
+        # ループ外ではなく、各Runの開始時に設定することでRun間の独立性を保つ
 
         for seed_idx in range(num_runs):
             # Agent/Env用の乱数生成器
             current_seed = base_seed + seed_idx
+            
+            # Global(Numba用) と Local(Env/Agent用) の両方を初期化
+            np.random.seed(current_seed)
             rng = np.random.default_rng(current_seed)
             
             for agent_idx in range(num_agents):
@@ -474,8 +477,12 @@ def simulate(
                         action = agent.select_action(state)
                         
                         # Debug出力用にQ値を取得 (現在の状態 state における全行動のQ値)
-                        current_q_mf = agent.q_mf[state].copy()
-                        current_q_mb = agent.q_mb[state].copy()
+                        # debug_episodeが有効な場合のみコピーを行う
+                        current_q_mf = None
+                        current_q_mb = None
+                        if debug_episode and seed_idx == 0 and agent_idx == 0:
+                            current_q_mf = agent.q_mf[state].copy()
+                            current_q_mb = agent.q_mb[state].copy()
                         
                         next_state, reward = env.step(action, phase_idx)
                         agent.observe(state, action, reward, next_state, phase_idx)

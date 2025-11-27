@@ -430,64 +430,105 @@ def simulate(
     mb_forget: bool = False,
     debug_episode: bool = False,
     debug_csv_path: Optional[str] = None,
+    debug_txt_path: Optional[str] = None,
 ) -> float:
     
     addictions = 0
     total_agents = num_agents * num_runs
     debug_records = []
     
-    # Numba内の乱数シード固定 (再現性のため)
-    np.random.seed(base_seed)
+    # テキストログファイルを開く (追記モードではなく新規作成)
+    log_file = None
+    if debug_episode and debug_txt_path:
+        log_file = open(debug_txt_path, "w", encoding="utf-8")
 
-    for seed_idx in range(num_runs):
-        # Agent/Env用の乱数生成器
-        current_seed = base_seed + seed_idx
-        rng = np.random.default_rng(current_seed)
-        
-        for agent_idx in range(num_agents):
-            env = AddictionEnvironment(rng)
-            agent = HybridAgent(beta, rng, mb_forget=mb_forget)
+    try:
+        # Numba内の乱数シード固定 (再現性のため)
+        np.random.seed(base_seed)
+
+        for seed_idx in range(num_runs):
+            # Agent/Env用の乱数生成器
+            current_seed = base_seed + seed_idx
+            rng = np.random.default_rng(current_seed)
             
-            state = env.reset()
-            counts = PhaseResult()
-            
-            # フェーズ実行
-            for phase_idx, (_, length, _) in enumerate(PHASES):
-                report_points = {1, length // 2, length}
+            for agent_idx in range(num_agents):
+                env = AddictionEnvironment(rng)
+                agent = HybridAgent(beta, rng, mb_forget=mb_forget)
                 
-                for step_in_phase in range(length):
-                    # Progress Log
-                    if progress_cb and (step_in_phase + 1) in report_points:
-                        progress_cb(beta, seed_idx, agent_idx, num_agents, num_runs, phase_idx, step_in_phase + 1, length)
+                state = env.reset()
+                counts = PhaseResult()
+                
+                # フェーズ実行
+                for phase_idx, (_, length, _) in enumerate(PHASES):
+                    report_points = {1, length // 2, length}
                     
-                    action = agent.select_action(state)
-                    next_state, reward = env.step(action, phase_idx)
-                    agent.observe(state, action, reward, next_state, phase_idx)
+                    for step_in_phase in range(length):
+                        # Progress Log
+                        if progress_cb and (step_in_phase + 1) in report_points:
+                            progress_cb(beta, seed_idx, agent_idx, num_agents, num_runs, phase_idx, step_in_phase + 1, length)
+                        
+                        # 行動選択前にQ値を取得したいが、select_action内でMBのPlanningが走るため
+                        # select_action後に取得すると、そのステップでのPlanning結果が反映された状態になる
+                        # ここでは「行動選択に使われたQ値」に近いものを表示するため、select_action直後の値を参照する
+                        
+                        action = agent.select_action(state)
+                        
+                        # Debug出力用にQ値を取得 (現在の状態 state における全行動のQ値)
+                        current_q_mf = agent.q_mf[state].copy()
+                        current_q_mb = agent.q_mb[state].copy()
+                        
+                        next_state, reward = env.step(action, phase_idx)
+                        agent.observe(state, action, reward, next_state, phase_idx)
 
-                    if debug_episode and seed_idx == 0 and agent_idx == 0:
-                        debug_records.append({
-                            "phase_name": PHASES[phase_idx][0],
-                            "phase_idx": phase_idx,
-                            "step": step_in_phase + 1,
-                            "state": state,
-                            "action": action,
-                            "action_name": ACTION_NAMES.get(action, str(action)),
-                            "reward": reward,
-                            "next_state": next_state,
-                        })
-                    
-                    # 統計収集 (Addictionフェーズのみ)
-                    if phase_idx == 1:
-                        if next_state == STATE_DRUG and reward > 0:
-                            counts.drug_choices += 1
-                        elif next_state == STATE_GOAL and reward > 0:
-                            counts.healthy_choices += 1
+                        if debug_episode and seed_idx == 0 and agent_idx == 0:
+                            # ログメッセージの構築
+                            q_mf_str = ", ".join([f"{x:.2f}" for x in current_q_mf])
+                            q_mb_str = ", ".join([f"{x:.2f}" for x in current_q_mb])
                             
-                    state = next_state
-            
-            # 依存判定
-            if counts.drug_choices > counts.healthy_choices:
-                addictions += 1
+                            log_lines = [
+                                f"[DEBUG] Beta={beta:.1f} Phase={PHASES[phase_idx][0]} Step={step_in_phase+1}",
+                                f"  State: {state} -> Action: {ACTION_NAMES.get(action, str(action))} -> Next: {next_state} (Reward: {reward})",
+                                f"  Q_MF: [{q_mf_str}]",
+                                f"  Q_MB: [{q_mb_str}]",
+                                "-" * 40
+                            ]
+                            
+                            # コンソール出力
+                            for line in log_lines:
+                                print(line)
+                            
+                            # ファイル出力
+                            if log_file:
+                                for line in log_lines:
+                                    log_file.write(line + "\n")
+
+                            debug_records.append({
+                                "phase_name": PHASES[phase_idx][0],
+                                "phase_idx": phase_idx,
+                                "step": step_in_phase + 1,
+                                "state": state,
+                                "action": action,
+                                "action_name": ACTION_NAMES.get(action, str(action)),
+                                "reward": reward,
+                                "next_state": next_state,
+                            })
+                        
+                        # 統計収集 (Addictionフェーズのみ)
+                        if phase_idx == 1:
+                            if next_state == STATE_DRUG and reward > 0:
+                                counts.drug_choices += 1
+                            elif next_state == STATE_GOAL and reward > 0:
+                                counts.healthy_choices += 1
+                                
+                        state = next_state
+                
+                # 依存判定
+                if counts.drug_choices > counts.healthy_choices:
+                    addictions += 1
+    finally:
+        if log_file:
+            log_file.close()
+            print(f"Debug log (seed=0, agent=0) written to {debug_txt_path}")
 
     if debug_records:
         if debug_csv_path:
@@ -552,6 +593,11 @@ def main():
             print(f"[Beta={beta:.1f}] Phase: {p_name} Step: {step}/{length}")
 
     for beta in beta_values:
+        # デバッグログのファイル名を生成
+        debug_txt_path = None
+        if args.debug_episode:
+            debug_txt_path = f"debug_log_beta_{beta:.2f}.txt"
+
         rate = simulate(
             beta,
             args.num_agents,
@@ -561,6 +607,7 @@ def main():
             mb_forget=args.mb_forget,
             debug_episode=args.debug_episode,
             debug_csv_path=args.debug_csv,
+            debug_txt_path=debug_txt_path,
         )
         rates.append(rate * 100)
         print(f"Result: Beta={beta:.1f} => Addiction Rate={rate*100:.2f}%")

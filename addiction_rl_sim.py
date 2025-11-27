@@ -143,6 +143,9 @@ def run_prioritized_sweeping(
     Q_vals = np.zeros(num_actions, dtype=np.float64)
     
     # --- Planning Loop ---
+    # modelベースのQ値を優先度付きスイープで更新
+
+    # n_sweeps回の思考
     for _ in range(n_sweeps):
         # 1. 思考する状態の選択 (Softmax on Priority H)
         max_h = np.max(H)
@@ -169,6 +172,7 @@ def run_prioritized_sweeping(
         # 2. 選択した状態のQ値をモデルから再計算
         for a in range(num_actions):
             visits = model_visits[s_tilde, a]
+            # 状態に訪れた経験がなければQ値は0
             if visits <= 0:
                 Q_vals[a] = 0.0
                 continue
@@ -195,7 +199,12 @@ def run_prioritized_sweeping(
         delta = np.abs(V[s_tilde] - max_q)
         V[s_tilde] = max_q
         
-        # 逆方向の状態への波及: h(s) = delta * max_a P(s_tilde | s, a)
+        # 全状態の優先度更新
+        # 画像のアルゴリズム:
+        # for all s: h(s) = delta * max_a P(s_tilde | s, a)
+        # H(s_tilde) = h(s_tilde)
+        # for all s != s_tilde: H(s) = max(h(s), H(s))
+        
         for s in range(num_states):
             max_p = 0.0
             for a in range(num_actions):
@@ -210,9 +219,13 @@ def run_prioritized_sweeping(
                     if p > max_p:
                         max_p = p
             
-            priority_s = delta * max_p
-            if priority_s > H[s]:
-                H[s] = priority_s
+            h_s = delta * max_p
+            
+            if s == s_tilde:
+                H[s] = h_s
+            else:
+                if h_s > H[s]:
+                    H[s] = h_s
 
     # --- Decay (思考結果の減衰) ---
     if decay > 0:
@@ -360,7 +373,7 @@ class HybridAgent:
         # MB Planning (JIT function call)
         self._plan_q_values()
         
-        # Epsilon-Greedy
+        # ε-Greedy
         if self.rng.random() < EPSILON:
             return int(self.rng.integers(NUM_ACTIONS))
             
@@ -369,7 +382,7 @@ class HybridAgent:
         
         # Argmax (tie-break random)
         max_val = np.max(q_mix)
-        best_actions = np.flatnonzero(np.isclose(q_mix, max_val))
+        best_actions = np.flatnonzero(np.isclose(q_mix, max_val,rtol=1e-08, atol=1e-12))
         return int(self.rng.choice(best_actions))
 
     def observe(self, state: int, action: int, reward: float, next_state: int, phase_idx: int):
@@ -387,7 +400,7 @@ class HybridAgent:
         if self.mb_forget:
             # 完全忘却モード: 毎回MB推定をゼロから再構築
             self.q_mb.fill(0.0)
-            decay = 0.0
+            decay = MB_DECAY
         else:
             decay = MB_DECAY
 
@@ -502,9 +515,9 @@ def simulate(
 
 def main():
     parser = argparse.ArgumentParser(description="Fast Hybrid RL Addiction Simulation")
-    parser.add_argument("--num-agents", type=int, default=50, help="Agents per seed")
-    parser.add_argument("--num-runs", type=int, default=5, help="Number of seeds")
-    parser.add_argument("--seed", type=int, default=42, help="Base random seed")
+    parser.add_argument("--num-agents", type=int, default=60, help="Agents per seed")
+    parser.add_argument("--num-runs", type=int, default=20, help="Number of seeds")
+    parser.add_argument("--seed", type=int, default=0, help="Base random seed")
     parser.add_argument(
         "--mb-forget",
         action="store_true",

@@ -31,6 +31,7 @@ ALPHA_MF = 0.05
 MB_DECAY = 0.01
 EPSILON = 0.1
 N_PRIORITIZED_SWEEPS = 50
+T_MB = 1.0
 R_G = 1.0
 R_P = -4.0
 R_SKIP_LONG = -0.3
@@ -198,6 +199,8 @@ class HybridAgent:
         self.rng = rng
         self.q_mf = np.zeros((NUM_STATES, NUM_ACTIONS))
         self.q_mb = np.zeros((NUM_STATES, NUM_ACTIONS))
+        self.V = np.zeros(NUM_STATES)
+        self.H = np.zeros(NUM_STATES)
         self.model_counts = np.zeros((NUM_STATES, NUM_ACTIONS, NUM_STATES))
         self.model_rewards = np.zeros((NUM_STATES, NUM_ACTIONS))
         self.model_visits = np.zeros((NUM_STATES, NUM_ACTIONS))
@@ -221,30 +224,70 @@ class HybridAgent:
         self.model_visits[state, action] += 1
 
     def _plan_q_values(self):
-        # 有界合理性: 各ステップで優先度付きスイーピングを実行後リセット
-        self.q_mb.fill(0.0)
+        # Implement bounded prioritized sweeping as in the paper (per-call restart)
         visited_pairs = np.argwhere(self.model_visits > 0)
         if visited_pairs.size == 0:
             return
-        best_next = np.zeros(NUM_STATES)
-        priorities = []
-        for s, a in visited_pairs:
-            total = self.model_visits[s, a]
-            probs = self.model_counts[s, a] / total
-            expected_reward = self.model_rewards[s, a] / total
-            target = expected_reward + DISCOUNT * np.dot(probs, best_next)
-            diff = abs(target - self.q_mb[s, a])
-            priorities.append(diff)
-        order = np.argsort(priorities)[::-1]
-        updates = min(N_PRIORITIZED_SWEEPS, len(order))
-        for idx in order[:updates]:
-            s, a = visited_pairs[idx]
-            total = self.model_visits[s, a]
-            probs = self.model_counts[s, a] / total
-            expected_reward = self.model_rewards[s, a] / total
-            target = expected_reward + DISCOUNT * np.dot(probs, best_next)
-            self.q_mb[s, a] += MB_DECAY * (target - self.q_mb[s, a])
-            best_next = np.max(self.q_mb, axis=1)
+
+        # Initialize per-call priority H and value V (restart each planning)
+        H = np.zeros(NUM_STATES)
+        V = np.zeros(NUM_STATES)
+
+        steps = 0
+        while steps < N_PRIORITIZED_SWEEPS:
+            steps += 1
+            # sample state ~ softmax(H / T_MB)
+            h_exp = np.exp(H / float(T_MB))
+            if np.isfinite(h_exp).all() and h_exp.sum() > 0:
+                probs = h_exp / h_exp.sum()
+            else:
+                probs = np.ones(NUM_STATES) / NUM_STATES
+            s_tilde = int(self.rng.choice(NUM_STATES, p=probs))
+
+            # compute Q(s_tilde, a) for all actions using current model and V
+            Q_vals = np.zeros(NUM_ACTIONS)
+            for a in range(NUM_ACTIONS):
+                total = self.model_visits[s_tilde, a]
+                if total <= 0:
+                    Q_vals[a] = 0.0
+                    continue
+                probs_s = self.model_counts[s_tilde, a] / total
+                expected_r = self.model_rewards[s_tilde, a] / total
+                Q_vals[a] = expected_r + DISCOUNT * np.dot(probs_s, V)
+
+            # store MB Q estimates for this state
+            self.q_mb[s_tilde] = Q_vals
+
+            M = float(np.max(Q_vals))
+            delta = abs(V[s_tilde] - M)
+            V[s_tilde] = M
+
+            # compute h(s) = delta * max_a P(s_tilde | s, a) for all s
+            h = np.zeros(NUM_STATES)
+            for s in range(NUM_STATES):
+                max_p = 0.0
+                for a in range(NUM_ACTIONS):
+                    tot = self.model_visits[s, a]
+                    if tot <= 0:
+                        continue
+                    p = self.model_counts[s, a, s_tilde] / tot
+                    if p > max_p:
+                        max_p = p
+                h[s] = delta * max_p
+
+            # update priorities H
+            H[s_tilde] = h[s_tilde]
+            for s in range(NUM_STATES):
+                if s == s_tilde:
+                    continue
+                H[s] = max(h[s], H[s])
+
+        # after planning, optionally apply small decay to previous q_mb entries
+        # (MB_DECAY is a decay coefficient, not a learning rate)
+        if MB_DECAY > 0:
+            self.q_mb *= (1.0 - MB_DECAY)
+        # merge planned values: overwrite planned states with computed entries
+        # (we kept q_mb updates during planning above)
 
 
 def simulate(

@@ -29,6 +29,16 @@ STATE_AFTEREFFECTS = tuple(range(8, 22))
 STATE_AFTER_SET = set(STATE_AFTEREFFECTS)
 AFTER_MAX = STATE_AFTEREFFECTS[-1]
 
+def aftereffect_forward_state(state: int) -> int:
+    if state >= AFTER_MAX:
+        return STATE_DRUG
+    return state + 1
+
+def aftereffect_backward_state(state: int) -> int:
+    if state <= STATE_DRUG:
+        return AFTER_MAX
+    return state - 1
+
 # ハイパーパラメータ
 DISCOUNT = 0.9
 ALPHA_MF = 0.05
@@ -314,18 +324,18 @@ class AddictionEnvironment:
             
             # Normal Aftereffect State
             if roll < AW_FORWARD[phase_idx]:
-                return min(AFTER_MAX, state + 1)
+                return aftereffect_forward_state(state)
             roll -= AW_FORWARD[phase_idx]
             if roll < AW_BACKWARD[phase_idx]:
-                return max(STATE_DRUG, state - 1)
+                return aftereffect_backward_state(state)
             return state
 
         if action == ACTION_DRUG:
             if roll < AD_FORWARD[phase_idx]:
-                return min(AFTER_MAX, state + 1)
+                return aftereffect_forward_state(state)
             roll -= AD_FORWARD[phase_idx]
             if roll < AD_BACKWARD[phase_idx]:
-                return max(STATE_DRUG, state - 1)
+                return aftereffect_backward_state(state)
             return state
             
         return state

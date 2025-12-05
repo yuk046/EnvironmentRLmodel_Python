@@ -119,24 +119,26 @@ def run_prioritized_sweeping(
     q_mb, 
     model_counts, 
     model_rewards, 
-    model_visits, 
     num_states, 
     num_actions, 
     n_sweeps, 
-    t_mb
+    t_mb,
+    rand_vals  # 事前生成された乱数配列 (長さ = n_sweeps)
 ):
     """
     Model-Basedエージェントの思考プロセス (Prioritized Sweeping)
-    毎回計算をリセットし、記憶に基づいて50回シミュレーションを行う。
+    毎回計算をリセットし、記憶に基づいてn_sweeps回シミュレーションを行う。
     """
     # 経験がまだなければ何もしない
-    # sum() は重いので簡易チェック
+    # model_countsに何か記録があるかチェック
     has_experience = False
     for s in range(num_states):
         for a in range(num_actions):
-            if model_visits[s, a] > 0:
-                has_experience = True
-                break
+            for ns in range(num_states):
+                if model_counts[s, a, ns] > 0:
+                    has_experience = True
+                    break
+            if has_experience: break
         if has_experience: break
     
     if not has_experience:
@@ -155,7 +157,7 @@ def run_prioritized_sweeping(
     # modelベースのQ値を優先度付きスイープで更新
 
     # n_sweeps回の思考
-    for _ in range(n_sweeps):
+    for sweep_idx in range(n_sweeps):
         # 1. 思考する状態の選択 (Softmax on Priority H)
         max_h = np.max(H)
         # 数値安定性のため max_h を引く
@@ -168,8 +170,8 @@ def run_prioritized_sweeping(
             # 全て0なら均等確率
             probs[:] = 1.0 / num_states
             
-        # 確率的選択 (CDF)
-        rand_val = np.random.random()
+        # 確率的選択 (CDF) - 事前生成された乱数を使用
+        rand_val = rand_vals[sweep_idx]
         cumulative = 0.0
         s_tilde = num_states - 1
         for i in range(num_states):
@@ -181,9 +183,13 @@ def run_prioritized_sweeping(
         # 2. 選択した状態のQ値をモデルから再計算
         # アルゴリズム: Q(s~,a) = Σ_s' p(s'|s~,a) [R(s~,a,s') + V(s')]
         for a in range(num_actions):
-            visits = model_visits[s_tilde, a]
-            # 状態に訪れた経験がなければQ値は0
-            if visits <= 0:
+            # 遷移カウントの合計を計算（整合性を保つため）
+            total_count = 0.0
+            for next_s in range(num_states):
+                total_count += model_counts[s_tilde, a, next_s]
+            
+            # 経験がなければQ値は0
+            if total_count <= 0:
                 Q_vals[a] = 0.0
                 continue
             
@@ -192,7 +198,7 @@ def run_prioritized_sweeping(
             for next_s in range(num_states):
                 count = model_counts[s_tilde, a, next_s]
                 if count > 0:
-                    prob_trans = count / visits
+                    prob_trans = count / total_count
                     # R(s,a,s') の期待値
                     r_expected = model_rewards[s_tilde, a, next_s] / count
                     q_val += prob_trans * (r_expected + V[next_s])
@@ -217,14 +223,18 @@ def run_prioritized_sweeping(
         for s in range(num_states):
             max_p = 0.0
             for a in range(num_actions):
-                visits_s = model_visits[s, a]
-                if visits_s <= 0:
+                # 遷移カウントの合計を計算
+                total_count_s = 0.0
+                for ns in range(num_states):
+                    total_count_s += model_counts[s, a, ns]
+                
+                if total_count_s <= 0:
                     continue
                 
                 # 遷移確率 P(s_tilde | s, a)
                 cnt = model_counts[s, a, s_tilde]
                 if cnt > 0:
-                    p = cnt / visits_s
+                    p = cnt / total_count_s
                     if p > max_p:
                         max_p = p
             
@@ -323,7 +333,8 @@ class AddictionEnvironment:
             roll -= AW_FORWARD[phase_idx]
             if roll < AW_BACKWARD[phase_idx]:
                 return aftereffect_backward_state(state)
-            return state
+            # 残り0.1%でlocation 4 (STATE_START) へ抜ける
+            return STATE_START
 
         if action == ACTION_DRUG:
             if roll < AD_FORWARD[phase_idx]:
@@ -331,7 +342,8 @@ class AddictionEnvironment:
             roll -= AD_FORWARD[phase_idx]
             if roll < AD_BACKWARD[phase_idx]:
                 return aftereffect_backward_state(state)
-            return state
+            # 残り1%でlocation 4 (STATE_START) へ抜ける
+            return STATE_START
             
         return state
 
@@ -426,15 +438,18 @@ class HybridAgent:
             # 完全忘却モード: 毎回MB推定をゼロから再構築
             self.q_mb.fill(0.0)
 
+        # 乱数配列を事前生成 (再現性のため、単一のRNGを使用)
+        rand_vals = self.rng.random(N_PRIORITIZED_SWEEPS)
+
         run_prioritized_sweeping(
             self.q_mb,
             self.model_counts,
             self.model_rewards,
-            self.model_visits,
             NUM_STATES,
             NUM_ACTIONS,
             N_PRIORITIZED_SWEEPS,
-            T_MB
+            T_MB,
+            rand_vals
         )
 
 
@@ -463,15 +478,9 @@ def simulate(
         log_file = open(debug_txt_path, "w", encoding="utf-8")
 
     try:
-        # Numba内の乱数シード固定 (再現性のため)
-        # ループ外ではなく、各Runの開始時に設定することでRun間の独立性を保つ
-
         for seed_idx in range(num_runs):
-            # Agent/Env用の乱数生成器
+            # Agent/Env用の乱数生成器 (単一のRNGで統一)
             current_seed = base_seed + seed_idx
-            
-            # Global(Numba用) と Local(Env/Agent用) の両方を初期化
-            np.random.seed(current_seed)
             rng = np.random.default_rng(current_seed)
             
             for agent_idx in range(num_agents):
@@ -590,9 +599,9 @@ def simulate(
 
 def main():
     parser = argparse.ArgumentParser(description="Fast Hybrid RL Addiction Simulation")
-    parser.add_argument("--num-agents", type=int, default=60, help="Agents per seed")
-    parser.add_argument("--num-runs", type=int, default=20, help="Number of seeds")
-    parser.add_argument("--seed", type=int, default=0, help="Base random seed")
+    parser.add_argument("--num-agents", type=int, default=900, help="Agents per seed")
+    parser.add_argument("--num-runs", type=int, default=1, help="Number of seeds")
+    parser.add_argument("--seed", type=int, default=42, help="Base random seed")
     parser.add_argument(
         "--mb-forget",
         action="store_true",

@@ -42,7 +42,8 @@ def aftereffect_backward_state(state: int) -> int:
 # ハイパーパラメータ
 DISCOUNT = 0.9
 ALPHA_MF = 0.05
-MB_DECAY = 0.01      # 思考結果の減衰率
+MODEL_DECAY = 0.01   # モデルカウントの減衰率 (毎ステップ)
+INITIAL_TRANSITION_COUNT = 5.0  # 新規遷移観測時の初期カウント
 EPSILON = 0.1        # 探索率
 N_PRIORITIZED_SWEEPS = 50
 T_MB = 1.0           # Softmax temperature for planning
@@ -122,9 +123,7 @@ def run_prioritized_sweeping(
     num_states, 
     num_actions, 
     n_sweeps, 
-    t_mb, 
-    discount, 
-    decay
+    t_mb
 ):
     """
     Model-Basedエージェントの思考プロセス (Prioritized Sweeping)
@@ -180,6 +179,7 @@ def run_prioritized_sweeping(
                 break
         
         # 2. 選択した状態のQ値をモデルから再計算
+        # アルゴリズム: Q(s~,a) = Σ_s' p(s'|s~,a) [R(s~,a,s') + V(s')]
         for a in range(num_actions):
             visits = model_visits[s_tilde, a]
             # 状態に訪れた経験がなければQ値は0
@@ -187,18 +187,17 @@ def run_prioritized_sweeping(
                 Q_vals[a] = 0.0
                 continue
             
-            # R(s,a)
-            r_expected = model_rewards[s_tilde, a] / visits
-            
-            # sum(P(s'|s,a) * V(s'))
-            future_v = 0.0
+            # Σ_s' p(s'|s~,a) [R(s~,a,s') + V(s')]
+            q_val = 0.0
             for next_s in range(num_states):
                 count = model_counts[s_tilde, a, next_s]
                 if count > 0:
                     prob_trans = count / visits
-                    future_v += prob_trans * V[next_s]
+                    # R(s,a,s') の期待値
+                    r_expected = model_rewards[s_tilde, a, next_s] / count
+                    q_val += prob_trans * (r_expected + V[next_s])
             
-            Q_vals[a] = r_expected + discount * future_v
+            Q_vals[a] = q_val
             
         # 結果を保存
         q_mb[s_tilde] = Q_vals
@@ -236,10 +235,6 @@ def run_prioritized_sweeping(
             else:
                 if h_s > H[s]:
                     H[s] = h_s
-
-    # --- Decay (思考結果の減衰) ---
-    if decay > 0:
-        q_mb *= (1.0 - decay)
 
 
 # ==========================================
@@ -376,8 +371,16 @@ class HybridAgent:
         # メンタルモデル (Numba用にfloat64で定義)
         # model_counts: [state, action, next_state] -> count
         self.model_counts = np.zeros((NUM_STATES, NUM_ACTIONS, NUM_STATES), dtype=np.float64)
-        self.model_rewards = np.zeros((NUM_STATES, NUM_ACTIONS), dtype=np.float64)
+        # model_rewards: [state, action, next_state] -> 遷移先依存の累積報酬 R(s,a,s')
+        self.model_rewards = np.zeros((NUM_STATES, NUM_ACTIONS, NUM_STATES), dtype=np.float64)
         self.model_visits = np.zeros((NUM_STATES, NUM_ACTIONS), dtype=np.float64)
+        
+        # 初期モデル: 全ての行動が自己遷移すると仮定 (論文準拠)
+        # "The initial model assumes that transitions bring the agent deterministically to the same state"
+        for s in range(NUM_STATES):
+            for a in range(NUM_ACTIONS):
+                self.model_counts[s, a, s] = 1.0  # 自己遷移のカウント
+                self.model_visits[s, a] = 1.0
 
     def select_action(self, state: int) -> int:
         # MB Planning (JIT function call)
@@ -400,9 +403,21 @@ class HybridAgent:
         td_target = reward + DISCOUNT * np.max(self.q_mf[next_state])
         self.q_mf[state, action] += ALPHA_MF * (td_target - self.q_mf[state, action])
         
-        # MB Model Update
-        self.model_counts[state, action, next_state] += 1.0
-        self.model_rewards[state, action] += reward
+        # MB Model Update (論文準拠)
+        # 1. カウント減衰: 全てのカウントを減衰させる
+        self.model_counts *= (1.0 - MODEL_DECAY)
+        self.model_rewards *= (1.0 - MODEL_DECAY)
+        self.model_visits *= (1.0 - MODEL_DECAY)
+        
+        # 2. 新規遷移の検出と初期カウント設定
+        # "The first time a new transition is observed an initial count is set to 5"
+        if self.model_counts[state, action, next_state] < 0.5:  # 実質的に未観測
+            self.model_counts[state, action, next_state] = INITIAL_TRANSITION_COUNT
+            self.model_rewards[state, action, next_state] = reward * INITIAL_TRANSITION_COUNT
+        else:
+            self.model_counts[state, action, next_state] += 1.0
+            self.model_rewards[state, action, next_state] += reward
+        
         self.model_visits[state, action] += 1.0
 
     def _plan_q_values(self):
@@ -410,9 +425,6 @@ class HybridAgent:
         if self.mb_forget:
             # 完全忘却モード: 毎回MB推定をゼロから再構築
             self.q_mb.fill(0.0)
-            decay = MB_DECAY
-        else:
-            decay = MB_DECAY
 
         run_prioritized_sweeping(
             self.q_mb,
@@ -422,9 +434,7 @@ class HybridAgent:
             NUM_STATES,
             NUM_ACTIONS,
             N_PRIORITIZED_SWEEPS,
-            T_MB,
-            DISCOUNT,
-            decay
+            T_MB
         )
 
 
@@ -531,10 +541,14 @@ def simulate(
                             })
                         
                         # 統計収集 (Addictionフェーズのみ)
+                        # Drug選択: Neutral最終状態(6)からDrug行動でDrug状態(7)へ遷移
+                        # Healthy選択: Goal状態(0)からGoal行動でStart状態(3)へ遷移（報酬獲得）
                         if phase_idx == 1:
-                            if next_state == STATE_DRUG and reward > 0:
+                            if (state == NEUTRAL_MAX and action == ACTION_DRUG 
+                                and next_state == STATE_DRUG):
                                 counts.drug_choices += 1
-                            elif state == STATE_GOAL and reward > 0:
+                            elif (state == STATE_GOAL and action == ACTION_GOAL 
+                                  and next_state == STATE_START):
                                 counts.healthy_choices += 1
                                 
                         state = next_state

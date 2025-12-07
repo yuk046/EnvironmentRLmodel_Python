@@ -1,26 +1,26 @@
-Simulation Start: Agents=900, Runs=20, Seed=42
+Simulation Start: Agents=900, Runs=1, Seed=2
 ------------------------------------------------------------
 [Beta=0.0] Phase: addiction Step: 500/1000
 [Beta=0.0] Phase: addiction Step: 1000/1000
-Result: Beta=0.0 => Addiction Rate=38.45%
+Result: Beta=0.0 => Addiction Rate=38.89%
 ------------------------------------------------------------
 [Beta=0.2] Phase: addiction Step: 500/1000
 [Beta=0.2] Phase: addiction Step: 1000/1000
-Result: Beta=0.2 => Addiction Rate=31.84%
+Result: Beta=0.2 => Addiction Rate=32.67%
 ------------------------------------------------------------
 [Beta=0.4] Phase: addiction Step: 500/1000
 [Beta=0.4] Phase: addiction Step: 1000/1000
-Result: Beta=0.4 => Addiction Rate=31.52%
+Result: Beta=0.4 => Addiction Rate=33.00%
 ------------------------------------------------------------
 [Beta=0.6] Phase: addiction Step: 500/1000
 [Beta=0.6] Phase: addiction Step: 1000/1000
-Result: Beta=0.6 => Addiction Rate=31.53%
+Result: Beta=0.6 => Addiction Rate=31.11%
 ------------------------------------------------------------
 [Beta=0.8] Phase: addiction Step: 500/1000
 [Beta=0.8] Phase: addiction Step: 1000/1000
-Result: Beta=0.8 => Addiction Rate=32.04%
+Result: Beta=0.8 => Addiction Rate=34.44%
 ------------------------------------------------------------
 [Beta=1.0] Phase: addiction Step: 500/1000
 [Beta=1.0] Phase: addiction Step: 1000/1000
-Result: Beta=1.0 => Addiction Rate=38.96%
+Result: Beta=1.0 => Addiction Rate=38.00%
 ------------------------------------------------------------

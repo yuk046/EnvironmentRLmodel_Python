@@ -114,7 +114,7 @@ for idx in range(len(PHASES)):
 # ==========================================
 # 2. Numba 高速化カーネル (Model-Based Planning)
 # ==========================================
-@jit(nopython=True, cache=True)
+@jit(nopython=True, cache=False)
 def run_prioritized_sweeping(
     q_mb, 
     model_counts, 
@@ -201,7 +201,7 @@ def run_prioritized_sweeping(
                     prob_trans = count / total_count
                     # R(s,a,s') の期待値
                     r_expected = model_rewards[s_tilde, a, next_s] / count
-                    q_val += prob_trans * (r_expected + V[next_s])
+                    q_val += prob_trans * (r_expected + DISCOUNT * V[next_s])
             
             Q_vals[a] = q_val
             
@@ -391,7 +391,7 @@ class HybridAgent:
         # "The initial model assumes that transitions bring the agent deterministically to the same state"
         for s in range(NUM_STATES):
             for a in range(NUM_ACTIONS):
-                self.model_counts[s, a, s] = 1.0  # 自己遷移のカウント
+                self.model_counts[s, a, s] = 3.0  # 自己遷移のカウント
                 self.model_visits[s, a] = 1.0
 
     def select_action(self, state: int) -> int:
@@ -416,16 +416,25 @@ class HybridAgent:
         self.q_mf[state, action] += ALPHA_MF * (td_target - self.q_mf[state, action])
         
         # MB Model Update (論文準拠)
-        # 1. カウント減衰: 全てのカウントを減衰させる
+        # 1. カウント減衰
         self.model_counts *= (1.0 - MODEL_DECAY)
         self.model_rewards *= (1.0 - MODEL_DECAY)
         self.model_visits *= (1.0 - MODEL_DECAY)
         
         # 2. 新規遷移の検出と初期カウント設定
         # "The first time a new transition is observed an initial count is set to 5"
-        if self.model_counts[state, action, next_state] < 0.5:  # 実質的に未観測
+        # 論文の "while keeping a degree of uncertainty" を守るため、
+        # 遷移をリセットする際は、対となる「自己遷移(初期の迷い)」も復活させる必要がある
+        if state != next_state:
+            self.model_counts[state, action, state] = 1.0
+            # 自己遷移の報酬は 0 と仮定 (初期状態と同じ)
+            self.model_rewards[state, action, state] = 0.0
+        
+        if self.model_counts[state, action, next_state] < 0.5:
+            # 観測した遷移を 5.0 にセット
             self.model_counts[state, action, next_state] = INITIAL_TRANSITION_COUNT
             self.model_rewards[state, action, next_state] = reward * INITIAL_TRANSITION_COUNT
+            
         else:
             self.model_counts[state, action, next_state] += 1.0
             self.model_rewards[state, action, next_state] += reward
@@ -492,6 +501,10 @@ def simulate(
                 
                 # フェーズ実行
                 for phase_idx, (_, length, _) in enumerate(PHASES):
+                    # フェーズ開始時にSTATE_STARTにリセット
+                    if phase_idx > 0:
+                        state = env.reset()
+                    
                     report_points = {1, length // 2, length}
                     
                     for step_in_phase in range(length):
@@ -509,9 +522,11 @@ def simulate(
                         # debug_episodeが有効な場合のみコピーを行う
                         current_q_mf = None
                         current_q_mb = None
+                        current_q_mix = None
                         if debug_episode and seed_idx == 0 and agent_idx == 0:
                             current_q_mf = agent.q_mf[state].copy()
                             current_q_mb = agent.q_mb[state].copy()
+                            current_q_mix = beta * current_q_mb + (1.0 - beta) * current_q_mf
                         
                         next_state, reward = env.step(action, phase_idx)
                         agent.observe(state, action, reward, next_state, phase_idx)
@@ -520,12 +535,14 @@ def simulate(
                             # ログメッセージの構築
                             q_mf_str = ", ".join([f"{x:.2f}" for x in current_q_mf])
                             q_mb_str = ", ".join([f"{x:.2f}" for x in current_q_mb])
+                            q_mix_str = ", ".join([f"{x:.2f}" for x in current_q_mix])
                             
                             log_lines = [
                                 f"[DEBUG] Beta={beta:.1f} Phase={PHASES[phase_idx][0]} Step={step_in_phase+1}",
                                 f"  State: {state} -> Action: {ACTION_NAMES.get(action, str(action))} -> Next: {next_state} (Reward: {reward})",
-                                f"  Q_MF: [{q_mf_str}]",
-                                f"  Q_MB: [{q_mb_str}]",
+                                f"  Q_MF:  [{q_mf_str}]",
+                                f"  Q_MB:  [{q_mb_str}]",
+                                f"  Q_MIX: [{q_mix_str}]",
                                 "-" * 40
                             ]
                             
@@ -550,12 +567,19 @@ def simulate(
                             })
                         
                         # 統計収集 (Addictionフェーズのみ)
-                        # Drug選択: Neutral最終状態(6)からDrug行動でDrug状態(7)へ遷移
+                        # Drug選択: 
+                        #   1. Neutral最終状態(6)からDrug行動でDrug状態(7)へ遷移
+                        #   2. アフターエフェクト区域(Drug状態含む)に滞在/行動して罰則を受けた時
                         # Healthy選択: Goal状態(0)からGoal行動でStart状態(3)へ遷移（報酬獲得）
                         if phase_idx == 1:
                             if (state == NEUTRAL_MAX and action == ACTION_DRUG 
                                 and next_state == STATE_DRUG):
                                 counts.drug_choices += 1
+                            elif (state == STATE_DRUG or state in STATE_AFTER_SET) and \
+                                 (next_state == STATE_DRUG or next_state in STATE_AFTER_SET):
+                                # アフターエフェクト区域内に留まった場合（罰則-1.2を受ける）
+                                # counts.drug_choices += 1
+                                pass
                             elif (state == STATE_GOAL and action == ACTION_GOAL 
                                   and next_state == STATE_START):
                                 counts.healthy_choices += 1

@@ -391,7 +391,7 @@ class HybridAgent:
         # "The initial model assumes that transitions bring the agent deterministically to the same state"
         for s in range(NUM_STATES):
             for a in range(NUM_ACTIONS):
-                self.model_counts[s, a, s] = 3.0  # 自己遷移のカウント
+                self.model_counts[s, a, s] = 5.0  # 自己遷移のカウント
                 self.model_visits[s, a] = 1.0
 
     def select_action(self, state: int) -> int:
@@ -414,21 +414,14 @@ class HybridAgent:
         # MF Update (Q-Learning)
         td_target = reward + DISCOUNT * np.max(self.q_mf[next_state])
         self.q_mf[state, action] += ALPHA_MF * (td_target - self.q_mf[state, action])
-        
         # MB Model Update (論文準拠)
         # 1. カウント減衰
         self.model_counts *= (1.0 - MODEL_DECAY)
         self.model_rewards *= (1.0 - MODEL_DECAY)
         self.model_visits *= (1.0 - MODEL_DECAY)
-        
         # 2. 新規遷移の検出と初期カウント設定
         # "The first time a new transition is observed an initial count is set to 5"
         # 論文の "while keeping a degree of uncertainty" を守るため、
-        # 遷移をリセットする際は、対となる「自己遷移(初期の迷い)」も復活させる必要がある
-        if state != next_state:
-            self.model_counts[state, action, state] = 1.0
-            # 自己遷移の報酬は 0 と仮定 (初期状態と同じ)
-            self.model_rewards[state, action, state] = 0.0
         
         if self.model_counts[state, action, next_state] < 0.5:
             # 観測した遷移を 5.0 にセット
@@ -438,7 +431,6 @@ class HybridAgent:
         else:
             self.model_counts[state, action, next_state] += 1.0
             self.model_rewards[state, action, next_state] += reward
-        
         self.model_visits[state, action] += 1.0
 
     def _plan_q_values(self):
@@ -480,6 +472,8 @@ def simulate(
     addictions = 0
     total_agents = num_agents * num_runs
     debug_records = []
+    # ラン毎の依存者数を記録（後で run ごとの率に変換）
+    run_addictions = [0 for _ in range(num_runs)]
     
     # テキストログファイルを開く (追記モードではなく新規作成)
     log_file = None
@@ -488,11 +482,12 @@ def simulate(
 
     try:
         for seed_idx in range(num_runs):
-            # Agent/Env用の乱数生成器 (単一のRNGで統一)
-            current_seed = base_seed + seed_idx
-            rng = np.random.default_rng(current_seed)
-            
             for agent_idx in range(num_agents):
+                # 固定ペアリングシード: (run, agent) ごとに一意のシードを割り当て
+                # これにより同じ (run, agent) 番号は全ての beta 値で同じ初期 RNG を使います
+                seed_for_agent = base_seed + seed_idx * num_agents + agent_idx
+                rng = np.random.default_rng(seed_for_agent)
+
                 env = AddictionEnvironment(rng)
                 agent = HybridAgent(beta, rng, mb_forget=mb_forget)
                 
@@ -502,8 +497,8 @@ def simulate(
                 # フェーズ実行
                 for phase_idx, (_, length, _) in enumerate(PHASES):
                     # フェーズ開始時にSTATE_STARTにリセット
-                    if phase_idx > 0:
-                        state = env.reset()
+                    # if phase_idx > 0:
+                    #     state = env.reset()
                     
                     report_points = {1, length // 2, length}
                     
@@ -589,6 +584,7 @@ def simulate(
                 # 依存判定
                 if counts.drug_choices > counts.healthy_choices:
                     addictions += 1
+                    run_addictions[seed_idx] += 1
 
                 if debug_episode and seed_idx == 0 and agent_idx == 0 and log_file:
                     log_file.write(f"Final Counts - Drug Choices: {counts.drug_choices}, Healthy Choices: {counts.healthy_choices}\n")
@@ -618,7 +614,10 @@ def simulate(
             writer.writerows(debug_records)
         print(f"Debug episode (seed=0, agent=0) written to {csv_path} ({len(debug_records)} steps)")
 
-    return addictions / total_agents
+    # run ごとの率を計算して返す
+    run_rates = [cnt / num_agents for cnt in run_addictions]
+    overall_rate = addictions / total_agents
+    return overall_rate, run_rates
 
 
 def main():
@@ -659,36 +658,53 @@ def main():
             p_name = PHASES[p_idx][0]
             print(f"[Beta={beta:.1f}] Phase: {p_name} Step: {step}/{length}")
 
-    current_seed = args.seed
     for beta in beta_values:
         # デバッグログのファイル名を生成
         debug_txt_path = None
         if args.debug_episode:
             debug_txt_path = f"debug_log_beta_{beta:.2f}.txt"
 
-        rate = simulate(
+        overall_rate, run_rates = simulate(
             beta,
             args.num_agents,
             args.num_runs,
-            current_seed,
+            args.seed,  # use the same base seed for paired comparisons across betas
             log_progress,
             mb_forget=args.mb_forget,
             debug_episode=args.debug_episode,
             debug_csv_path=args.debug_csv,
             debug_txt_path=debug_txt_path,
         )
-        current_seed += args.num_runs  # 次のBetaではシードをずらす
-        rates.append(rate * 100)
-        print(f"Result: Beta={beta:.1f} => Addiction Rate={rate*100:.2f}%")
+        # keep base seed unchanged so pairing holds across betas
+        # run_rates: list of length num_runs with rates in [0,1]
+        mean_percent = np.mean(run_rates) * 100.0
+        rates.append(mean_percent)
+        # store run-level rates (as percent) for plotting error bars
+        # convert to percent and keep in a separate list parallel to beta_values
+        if 'all_run_rates' not in locals():
+            all_run_rates = []
+        all_run_rates.append([r * 100.0 for r in run_rates])
+        print(f"Result: Beta={beta:.1f} => Addiction Rate={mean_percent:.2f}% (mean over runs)")
         print("-" * 60)
 
-    # グラフ描画
+    # グラフ描画: run毎の率から平均 ± SEM を描画し、平均線を太くする
+    means = np.array(rates)
+    # all_run_rates: list[num_betas][num_runs]
+    run_matrix = np.array(all_run_rates)  # shape: (num_betas, num_runs)
+    sems = np.std(run_matrix, axis=1, ddof=1) / np.sqrt(run_matrix.shape[1])
+
     plt.figure(figsize=(8, 5))
-    plt.plot(beta_values, rates, marker="o", linewidth=2, label="No Treatment")
+    # 薄い点で各 run の値をプロット（軽く横にジッタ）
+    for i, vals in enumerate(run_matrix):
+        x = np.full(len(vals), beta_values[i]) + (np.random.random(len(vals)) - 0.5) * 0.01
+        plt.scatter(x, vals, color='gray', alpha=0.25, s=10)
+
+    # 平均 ± SEM を太い色強い線で描画
+    plt.errorbar(beta_values, means, yerr=sems, fmt='-o', color='C0', ecolor='C0', elinewidth=1.5, capsize=4, linewidth=3, markersize=6, label='Mean ± SEM')
     plt.title(f"Transition to Addiction (N={args.num_agents * args.num_runs})")
     plt.xlabel("Degree of MB Control (Beta)")
     plt.ylabel("Addiction Rate (%)")
-    plt.ylim(20, 60)
+    plt.ylim(0, 100)
     plt.grid(True, linestyle="--", alpha=0.6)
     plt.legend()
     plt.tight_layout()

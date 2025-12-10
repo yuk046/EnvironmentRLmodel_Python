@@ -3,7 +3,6 @@ import csv
 import math
 from dataclasses import dataclass
 from typing import List, Tuple, Set, Optional
-
 import matplotlib.pyplot as plt
 import numpy as np
 from numba import jit
@@ -277,6 +276,7 @@ class AddictionEnvironment:
         curr = self.state
         next_state = curr
         
+        # エージェントの現在地によって適応される行動ルールが異なる
         if curr in STATE_NEUTRAL_SET:
             next_state = self._transition_neutral(curr, action, phase_idx)
         elif curr == STATE_DRUG or curr in STATE_AFTER_SET:
@@ -359,10 +359,13 @@ class AddictionEnvironment:
     def _reward(self, current_state: int, action: int, next_state: int, phase_idx: int) -> float:
         r = PHASE_REWARD_TABLE[phase_idx, next_state]
 
+        # 状態0でagした際
         if current_state == STATE_GOAL and action == ACTION_GOAL and next_state == STATE_START:
             r += R_G
+        # 状態6でadした際
         elif (current_state == NEUTRAL_MAX and action == ACTION_DRUG and next_state == STATE_DRUG):
             r += PHASE_DRUG_REWARDS[phase_idx]
+        # 状態７から７への移動
         elif current_state == STATE_DRUG and next_state == STATE_DRUG:
             r += AFTER_PHASE_REWARDS[phase_idx]
         
@@ -390,10 +393,11 @@ class HybridAgent:
         self.q_mb = np.zeros((NUM_STATES, NUM_ACTIONS), dtype=np.float64)
         
         # メンタルモデル (Numba用にfloat64で定義)
-        # model_counts: [state, action, next_state] -> count
+        # [今の状態, 行動, 次の状態] に何回遷移したかを記録する3次元配列
         self.model_counts = np.zeros((NUM_STATES, NUM_ACTIONS, NUM_STATES), dtype=np.float64)
-        # model_rewards: [state, action, next_state] -> 遷移先依存の累積報酬 R(s,a,s')
+        # そこで得られた報酬の累積値
         self.model_rewards = np.zeros((NUM_STATES, NUM_ACTIONS, NUM_STATES), dtype=np.float64)
+        # その状態・行動を何回試したかの合計
         self.model_visits = np.zeros((NUM_STATES, NUM_ACTIONS), dtype=np.float64)
         
         # 初期モデル: 全ての行動が自己遷移すると仮定 (論文準拠)
@@ -414,13 +418,17 @@ class HybridAgent:
         # Hybrid Q-value
         q_mix = self.beta * self.q_mb[state] + (1.0 - self.beta) * self.q_mf[state]
         
-        # Argmax (tie-break random)
+        # 最も価値が高い行動を選ぶ (Argmax)
         max_val = np.max(q_mix)
+        # 同着1位が複数ある場合に備えて、最大値に近い行動を全てリストアップ
         best_actions = np.flatnonzero(np.isclose(q_mix, max_val,rtol=1e-08, atol=1e-12))
+        # 同着の中からランダムに1つ選んで返す
         return int(self.rng.choice(best_actions))
 
+    # モデルの学習機構
     def observe(self, state: int, action: int, reward: float, next_state: int, phase_idx: int):
-        # MF Update (Q-Learning)
+        # --- Model-Free (直感) の更新 ---
+        # Q学習の式: Q(s,a) ← Q(s,a) + α * (R + γ*maxQ(s') - Q(s,a))
         td_target = reward + DISCOUNT * np.max(self.q_mf[next_state])
         self.q_mf[state, action] += ALPHA_MF * (td_target - self.q_mf[state, action])
         # MB Model Update (論文準拠)
@@ -428,18 +436,21 @@ class HybridAgent:
         self.model_counts *= (1.0 - MODEL_DECAY)
         self.model_rewards *= (1.0 - MODEL_DECAY)
         self.model_visits *= (1.0 - MODEL_DECAY)
+
         # 2. 新規遷移の検出と初期カウント設定
         # "The first time a new transition is observed an initial count is set to 5"
         # 論文の "while keeping a degree of uncertainty" を守るため、
-        
         if self.model_counts[state, action, next_state] < 0.5:
             # 観測した遷移を 5.0 にセット
             self.model_counts[state, action, next_state] = INITIAL_TRANSITION_COUNT
+            # 報酬もカウントに合わせてスケールして記録
             self.model_rewards[state, action, next_state] = reward * INITIAL_TRANSITION_COUNT
             
         else:
+            # 既に知っている遷移なら、カウントを +1 するだけ
             self.model_counts[state, action, next_state] += 1.0
             self.model_rewards[state, action, next_state] += reward
+
         self.model_visits[state, action] += 1.0
 
     def _plan_q_values(self):
@@ -520,6 +531,7 @@ def simulate(
                         # select_action後に取得すると、そのステップでのPlanning結果が反映された状態になる
                         # ここでは「行動選択に使われたQ値」に近いものを表示するため、select_action直後の値を参照する
                         
+                        # 行動選択(MBはPlaning)
                         action = agent.select_action(state)
                         
                         # Debug出力用にQ値を取得 (現在の状態 state における全行動のQ値)
@@ -532,6 +544,7 @@ def simulate(
                             current_q_mb = agent.q_mb[state].copy()
                             current_q_mix = beta * current_q_mb + (1.0 - beta) * current_q_mf
                         
+                        # 行動、学習
                         next_state, reward = env.step(action, phase_idx)
                         agent.observe(state, action, reward, next_state, phase_idx)
 

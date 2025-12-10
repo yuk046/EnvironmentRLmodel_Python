@@ -29,6 +29,7 @@ STATE_AFTEREFFECTS = tuple(range(8, 22))
 STATE_AFTER_SET = set(STATE_AFTEREFFECTS)
 AFTER_MAX = STATE_AFTEREFFECTS[-1]
 
+# アフターエフェクト区間でのループを定義
 def aftereffect_forward_state(state: int) -> int:
     if state >= AFTER_MAX:
         return STATE_DRUG
@@ -45,7 +46,7 @@ ALPHA_MF = 0.05
 MODEL_DECAY = 0.01   # モデルカウントの減衰率 (毎ステップ)
 INITIAL_TRANSITION_COUNT = 5.0  # 新規遷移観測時の初期カウント
 EPSILON = 0.1        # 探索率
-N_PRIORITIZED_SWEEPS = 50
+N_PRIORITIZED_SWEEPS = 50 #思考回数
 T_MB = 1.0           # Softmax temperature for planning
 
 # 報酬設定
@@ -65,6 +66,7 @@ ACTION_GOAL = 6
 ACTION_DRUG = 7
 ACTION_AW = 8
 
+# 状態遷移
 AS_ACTION_TARGETS = {
     ACTION_AS2: 1,
     ACTION_AS3: 2,
@@ -74,6 +76,7 @@ AS_ACTION_TARGETS = {
     ACTION_AS7: 6,
 }
 
+# debug用の名前
 ACTION_NAMES = {
     ACTION_AS2: "as2",
     ACTION_AS3: "as3",
@@ -87,12 +90,14 @@ ACTION_NAMES = {
 }
 
 # 遷移確率テーブル (f1: Pre-drug, f2: Addiction)
-NEUTRAL_MOVE_SUCCESS = [0.99, 0.99]
-NEUTRAL_SKIP_SUCCESS = [0.0001, 0.0001]
+NEUTRAL_MOVE_SUCCESS = [0.99, 0.99] #隣り合う状態遷移
+NEUTRAL_SKIP_SUCCESS = [0.0001, 0.0001] #離れた状態遷移
+# アフターエフェクト区間の状態遷移
 AFTER_AG_EXIT = [0.001, 0.001]
 AFTER_AS_EXIT = [0.001, 0.001]
 AW_FORWARD = [0.4995, 0.4995]
 AW_BACKWARD = [0.4995, 0.4995]
+# 状態15(14)での特別遷移
 AW_SPECIAL_MOVE = [0.2, 0.2]
 AW_SPECIAL_EXIT = [0.6, 0.6]
 AD_FORWARD = [0.745, 0.745]
@@ -105,10 +110,10 @@ PHASES: Tuple[Tuple[str, int, float], ...] = (
 )
 
 # 報酬テーブルの事前構築
-PHASE_REWARD_TABLE = np.zeros((len(PHASES), NUM_STATES))
-PHASE_DRUG_REWARDS = np.array([phase[2] for phase in PHASES], dtype=np.float64)
+PHASE_REWARD_TABLE = np.zeros((len(PHASES), NUM_STATES)) #2x22
+PHASE_DRUG_REWARDS = np.array([phase[2] for phase in PHASES], dtype=np.float64) #[0.0, 10.0]
 for idx in range(len(PHASES)):
-    PHASE_REWARD_TABLE[idx, list(STATE_AFTEREFFECTS)] = AFTER_PHASE_REWARDS[idx]
+    PHASE_REWARD_TABLE[idx, list(STATE_AFTEREFFECTS)] = AFTER_PHASE_REWARDS[idx] #アフターエフェクト区間の状態に罰を定義
 
 
 # ==========================================
@@ -144,6 +149,8 @@ def run_prioritized_sweeping(
     if not has_experience:
         return
 
+    # --- Early Interrupted Stochastic Prioritized Sweeping pseudocode ---
+
     # --- 思考の初期化 (Reset) ---
     # 優先度キュー(H)と価値推定(V)を毎回ゼロからスタート
     H = np.zeros(num_states, dtype=np.float64)
@@ -156,7 +163,7 @@ def run_prioritized_sweeping(
     # --- Planning Loop ---
     # modelベースのQ値を優先度付きスイープで更新
 
-    # n_sweeps回の思考
+    # n_sweeps(50)回の思考
     for sweep_idx in range(n_sweeps):
         # 1. 思考する状態の選択 (Softmax on Priority H)
         max_h = np.max(H)
@@ -170,7 +177,7 @@ def run_prioritized_sweeping(
             # 全て0なら均等確率
             probs[:] = 1.0 / num_states
             
-        # 確率的選択 (CDF) - 事前生成された乱数を使用
+        # 思考する状態を確率的選択 (CDF) - 事前生成された乱数を使用
         rand_val = rand_vals[sweep_idx]
         cumulative = 0.0
         s_tilde = num_states - 1
@@ -198,20 +205,20 @@ def run_prioritized_sweeping(
             for next_s in range(num_states):
                 count = model_counts[s_tilde, a, next_s]
                 if count > 0:
-                    prob_trans = count / total_count
+                    prob_trans = count / total_count #遷移確率の計算
                     # R(s,a,s') の期待値
                     r_expected = model_rewards[s_tilde, a, next_s] / count
                     q_val += prob_trans * (r_expected + DISCOUNT * V[next_s])
             
-            Q_vals[a] = q_val
+            Q_vals[a] = q_val #もしここでこの行動をしたら、確率Pでここに行って報酬Rがもらえ、その先には価値Vが待っている
             
         # 結果を保存
         q_mb[s_tilde] = Q_vals
         
         # 3. 優先度 H の更新
         # V(s_tilde) の更新幅 delta
-        max_q = np.max(Q_vals)
-        delta = np.abs(V[s_tilde] - max_q)
+        max_q = np.max(Q_vals) #さっき計算した中で、一番推定価値が高いのが新しい状態価値になる
+        delta = np.abs(V[s_tilde] - max_q) #以前思っていた価値 V[s_tilde] と、今計算した新しい価値 max_q の差を計算
         V[s_tilde] = max_q
         
         # 全状態の優先度更新
@@ -233,8 +240,10 @@ def run_prioritized_sweeping(
                 
                 # 遷移確率 P(s_tilde | s, a)
                 cnt = model_counts[s, a, s_tilde]
+                #その状態から行動aをしてs_tildeに遷移したことがあるなら
                 if cnt > 0:
                     p = cnt / total_count_s
+                    #現状遷移確率が最も高いなら
                     if p > max_p:
                         max_p = p
             

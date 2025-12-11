@@ -122,7 +122,7 @@ for idx in range(len(PHASES)):
 def run_prioritized_sweeping(
     q_mb, 
     model_counts, 
-    model_rewards, 
+    model_rewards,
     num_states, 
     num_actions, 
     n_sweeps, 
@@ -130,129 +130,132 @@ def run_prioritized_sweeping(
     rand_vals  # 事前生成された乱数配列 (長さ = n_sweeps)
 ):
     """
-    Model-Basedエージェントの思考プロセス (Prioritized Sweeping)
-    毎回計算をリセットし、記憶に基づいてn_sweeps回シミュレーションを行う。
+    Numba対応版 Early Interrupted Stochastic Prioritized Sweeping.
+    - q_mb: (num_states, num_actions) に対して、選ばれた状態のみバックアップを書き込む
+    - model_counts, model_rewards: shape (num_states, num_actions, num_states)
+    - rand_vals: 一様乱数 [0,1) の配列（長さ >= n_sweeps）
     """
-    # 経験がまだなければ何もしない
-    # model_countsに何か記録があるかチェック
-    has_experience = False
-    for s in range(num_states):
-        for a in range(num_actions):
-            for ns in range(num_states):
-                if model_counts[s, a, ns] > 0:
-                    has_experience = True
-                    break
-            if has_experience: break
-        if has_experience: break
-    
-    if not has_experience:
-        return
+    # 局所変数初期化
+    H = np.zeros(num_states, dtype=np.float64)   # 優先度
+    V = np.zeros(num_states, dtype=np.float64)   # 状態価値（max_a Q）
+    # 一時配列
+    q_temp = np.zeros(num_actions, dtype=np.float64)
+    probs = np.zeros(num_states, dtype=np.float64)  # softmax 分布
+    exp_vals = np.zeros(num_states, dtype=np.float64)
 
-    # --- Early Interrupted Stochastic Prioritized Sweeping pseudocode ---
-
-    # --- 思考の初期化 (Reset) ---
-    # 優先度キュー(H)と価値推定(V)を毎回ゼロからスタート
-    H = np.zeros(num_states, dtype=np.float64)
-    V = np.zeros(num_states, dtype=np.float64)
-    
-    # 作業用バッファ
-    probs = np.zeros(num_states, dtype=np.float64)
-    Q_vals = np.zeros(num_actions, dtype=np.float64)
-    
-    # --- Planning Loop ---
-    # modelベースのQ値を優先度付きスイープで更新
-
-    # n_sweeps(50)回の思考
-    for sweep_idx in range(n_sweeps):
-        # 1. 思考する状態の選択 (Softmax on Priority H)
-        max_h = np.max(H)
-        # 数値安定性のため max_h を引く
-        h_exp = np.exp((H - max_h) / t_mb)
-        sum_h_exp = np.sum(h_exp)
-        
-        if sum_h_exp > 1e-9:
-            probs = h_exp / sum_h_exp
-        else:
-            # 全て0なら均等確率
-            probs[:] = 1.0 / num_states
-            
-        # 思考する状態を確率的選択 (CDF) - 事前生成された乱数を使用
-        rand_val = rand_vals[sweep_idx]
-        cumulative = 0.0
-        s_tilde = num_states - 1
+    # 事前に next-state確率の分母（countsの和）を使うための一時変数
+    # main loop: n_sweeps 回だけ "早期打ち切り" で1状態ずつ処理
+    steps = 0
+    while steps < n_sweeps:
+        # ---------------------------
+        # 1) softmax(H / t_mb) による状態サンプリング
+        # ---------------------------
+        # Compute exp(H / t_mb) safely (ここでは t_mb > 0 を想定)
+        inv_t = 1.0 / t_mb
+        sum_exp = 0.0
         for i in range(num_states):
-            cumulative += probs[i]
-            if rand_val <= cumulative:
+            # e^{H[i]/T}
+            val = math.exp(H[i] * inv_t)
+            exp_vals[i] = val
+            sum_exp += val
+
+        # 正規化して累積でサンプリング
+        # sum_exp が 0 になることはほぼない（exp >= 0）だが安全対策
+        if sum_exp <= 0.0:
+            for i in range(num_states):
+                probs[i] = 1.0 / num_states
+        else:
+            for i in range(num_states):
+                probs[i] = exp_vals[i] / sum_exp
+
+        r = rand_vals[steps]
+        cum = 0.0
+        s_tilde = 0
+        for i in range(num_states):
+            cum += probs[i]
+            if r < cum:
                 s_tilde = i
                 break
-        
-        # 2. 選択した状態のQ値をモデルから再計算
-        # アルゴリズム: Q(s~,a) = Σ_s' p(s'|s~,a) [R(s~,a,s') + V(s')]
+
+        # ---------------------------
+        # 2) 選ばれた状態 s_tilde の Q(s_tilde, a) をモデルから計算
+        #    Q(s,a) = sum_{s'} P(s'|s,a) [ R(s,a,s') + V[s'] ]
+        # ---------------------------
         for a in range(num_actions):
-            # 遷移カウントの合計を計算（整合性を保つため）
-            total_count = 0.0
-            for next_s in range(num_states):
-                total_count += model_counts[s_tilde, a, next_s]
-            
-            # 経験がなければQ値は0
-            if total_count <= 0:
-                Q_vals[a] = 0.0
-                continue
-            
-            # Σ_s' p(s'|s~,a) [R(s~,a,s') + V(s')]
             q_val = 0.0
-            for next_s in range(num_states):
-                count = model_counts[s_tilde, a, next_s]
-                if count > 0:
-                    prob_trans = count / total_count #遷移確率の計算
-                    # R(s,a,s') の期待値
-                    r_expected = model_rewards[s_tilde, a, next_s] / count
-                    q_val += prob_trans * (r_expected + DISCOUNT * V[next_s])
-            
-            Q_vals[a] = q_val #もしここでこの行動をしたら、確率Pでここに行って報酬Rがもらえ、その先には価値Vが待っている
-            
-        # 結果を保存
-        q_mb[s_tilde] = Q_vals
-        
-        # 3. 優先度 H の更新
-        # V(s_tilde) の更新幅 delta
-        max_q = np.max(Q_vals) #さっき計算した中で、一番推定価値が高いのが新しい状態価値になる
-        delta = np.abs(V[s_tilde] - max_q) #以前思っていた価値 V[s_tilde] と、今計算した新しい価値 max_q の差を計算
-        V[s_tilde] = max_q
-        
-        # 全状態の優先度更新
-        # 画像のアルゴリズム:
-        # for all s: h(s) = delta * max_a P(s_tilde | s, a)
-        # H(s_tilde) = h(s_tilde)
-        # for all s != s_tilde: H(s) = max(h(s), H(s))
-        
+            # denom = sum_s' counts[s_tilde,a,s']
+            denom = 0.0
+            for sp in range(num_states):
+                denom += model_counts[s_tilde, a, sp]
+
+            if denom <= 0.0:
+                # その行動は観測されていない -> 期待値0として扱う（あるいは既存 q_mb を利用する選択肢もある）
+                q_temp[a] = 0.0
+                continue
+
+            # accumulate expectation
+            for sp in range(num_states):
+                cnt = model_counts[s_tilde, a, sp]
+                if cnt <= 0.0:
+                    continue
+                p = cnt / denom
+                # 期待報酬: model_rewards / cnt (累積報酬をカウントで割る)
+                r_avg = model_rewards[s_tilde, a, sp] / cnt
+                q_val += p * (r_avg + V[sp])
+            q_temp[a] = q_val
+
+        # 書き込み：q_mb の s_tilde 行だけ更新（論文疑似コードに準拠）
+        for a in range(num_actions):
+            q_mb[s_tilde, a] = q_temp[a]
+
+        # ---------------------------
+        # 3) V の更新と Δ 計算
+        # ---------------------------
+        # M = max_a Q(s_tilde, a)
+        M = q_temp[0]
+        for a in range(1, num_actions):
+            if q_temp[a] > M:
+                M = q_temp[a]
+
+        delta = V[s_tilde] - M
+        if delta < 0.0:
+            delta = -delta
+        V[s_tilde] = M
+
+        # ---------------------------
+        # 4) 逆伝播 h(s) = Δ * max_a P(s_tilde | s, a)
+        # ---------------------------
+        h = np.zeros(num_states, dtype=np.float64)
+        # For each predecessor state s, find max_a P(s_tilde | s, a)
         for s in range(num_states):
             max_p = 0.0
             for a in range(num_actions):
-                # 遷移カウントの合計を計算
-                total_count_s = 0.0
-                for ns in range(num_states):
-                    total_count_s += model_counts[s, a, ns]
-                
-                if total_count_s <= 0:
+                # denom for (s,a)
+                denom_sa = 0.0
+                for sp in range(num_states):
+                    denom_sa += model_counts[s, a, sp]
+                if denom_sa <= 0.0:
                     continue
-                
-                # 遷移確率 P(s_tilde | s, a)
-                cnt = model_counts[s, a, s_tilde]
-                #その状態から行動aをしてs_tildeに遷移したことがあるなら
-                if cnt > 0:
-                    p = cnt / total_count_s
-                    #現状遷移確率が最も高いなら
-                    if p > max_p:
-                        max_p = p
-            
-            h_s = delta * max_p
-            
+                p_s_to_st = model_counts[s, a, s_tilde] / denom_sa
+                if p_s_to_st > max_p:
+                    max_p = p_s_to_st
+            h[s] = delta * max_p
+
+        # ---------------------------
+        # 5) H の更新（s_tilde は上書き、他は max で蓄積）
+        # ---------------------------
+        H[s_tilde] = h[s_tilde]
+        for s in range(num_states):
             if s == s_tilde:
-                H[s] = h_s
-            else:
-                if h_s > H[s]:
-                    H[s] = h_s
+                continue
+            # H[s] = max(h[s], H[s])
+            if h[s] > H[s]:
+                H[s] = h[s]
+
+        steps += 1
+
+    # end while
+    return  # q_mb は参照渡しで更新される
 
 
 # ==========================================
@@ -405,7 +408,7 @@ class HybridAgent:
         for s in range(NUM_STATES):
             for a in range(NUM_ACTIONS):
                 self.model_counts[s, a, s] = 5.0  # 自己遷移のカウント
-                self.model_visits[s, a] = 1.0
+                self.model_visits[s, a] = 5.0
 
     def select_action(self, state: int) -> int:
         # MB Planning (JIT function call)
@@ -451,7 +454,14 @@ class HybridAgent:
             self.model_counts[state, action, next_state] += 1.0
             self.model_rewards[state, action, next_state] += reward
 
-        self.model_visits[state, action] += 1.0
+        # model_counts の変更は単位 "1" または "INITIAL_TRANSITION_COUNT" で行うため
+        # model_visits も同じスケールで更新して和と整合させる。
+        # 新規遷移時は model_counts を INITIAL_TRANSITION_COUNT にセットしているため
+        # visits も同量だけ増やす。
+        if self.model_counts[state, action, next_state] == INITIAL_TRANSITION_COUNT:
+            self.model_visits[state, action] += INITIAL_TRANSITION_COUNT
+        else:
+            self.model_visits[state, action] += 1.0
 
     def _plan_q_values(self):
         """高速化カーネルを呼び出す"""
@@ -550,9 +560,14 @@ def simulate(
 
                         if debug_episode and seed_idx == 0 and agent_idx == 0:
                             # ログメッセージの構築
-                            q_mf_str = ", ".join([f"{x:.2f}" for x in current_q_mf])
-                            q_mb_str = ", ".join([f"{x:.2f}" for x in current_q_mb])
-                            q_mix_str = ", ".join([f"{x:.2f}" for x in current_q_mix])
+                            q_mf_str = ", ".join([f"{x:.6f}" for x in current_q_mf])
+                            q_mb_str = ", ".join([f"{x:.6f}" for x in current_q_mb])
+                            q_mix_str = ", ".join([f"{x:.6f}" for x in current_q_mix])
+                            # 現在の状態と行動に紐づくMBモデル（遷移カウントと累積報酬）も併せて出力
+                            curr_model_counts = agent.model_counts[state, action].copy()
+                            curr_model_rewards = agent.model_rewards[state, action].copy()
+                            model_counts_str = ", ".join([f"{x:.3f}" for x in curr_model_counts])
+                            model_rewards_str = ", ".join([f"{x:.3f}" for x in curr_model_rewards])
                             
                             log_lines = [
                                 f"[DEBUG] Beta={beta:.1f} Phase={PHASES[phase_idx][0]} Step={step_in_phase+1}",
@@ -560,6 +575,8 @@ def simulate(
                                 f"  Q_MF:  [{q_mf_str}]",
                                 f"  Q_MB:  [{q_mb_str}]",
                                 f"  Q_MIX: [{q_mix_str}]",
+                                f"  MODEL_COUNTS(s,a,*):  [{model_counts_str}]",
+                                f"  MODEL_REWARDS(s,a,*): [{model_rewards_str}]",
                                 "-" * 40
                             ]
                             
@@ -595,8 +612,8 @@ def simulate(
                             elif (state == STATE_DRUG or state in STATE_AFTER_SET) and \
                                  (next_state == STATE_DRUG or next_state in STATE_AFTER_SET):
                                 # アフターエフェクト区域内に留まった場合（罰則-1.2を受ける）
-                                # counts.drug_choices += 1
-                                pass
+                                counts.drug_choices += 1
+                                # pass
                             elif (state == STATE_GOAL and action == ACTION_GOAL 
                                   and next_state == STATE_START):
                                 counts.healthy_choices += 1

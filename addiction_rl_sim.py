@@ -203,7 +203,7 @@ def run_prioritized_sweeping(
                 p = cnt / denom
                 # 期待報酬: model_rewards / cnt (累積報酬をカウントで割る)
                 r_avg = model_rewards[s_tilde, a, sp] / cnt
-                q_val += p * (r_avg + DISCOUNT * V[sp])
+                q_val += p * (r_avg + discount * V[sp])
             q_temp[a] = q_val
 
         # 書き込み：q_mb の s_tilde 行だけ更新（論文疑似コードに準拠）
@@ -226,10 +226,15 @@ def run_prioritized_sweeping(
 
         # ---------------------------
         # 4) 逆伝播 h(s) = Δ * max_a P(s_tilde | s, a)
+        #    ただし、自己遷移(s == s_tilde)は除外する
         # ---------------------------
         h = np.zeros(num_states, dtype=np.float64)
         # For each predecessor state s, find max_a P(s_tilde | s, a)
         for s in range(num_states):
+            # 自己遷移を除外: s == s_tilde の場合はスキップ
+            if s == s_tilde:
+                continue
+                
             max_p = 0.0
             for a in range(num_actions):
                 # denom for (s,a)
@@ -411,8 +416,8 @@ class HybridAgent:
         # "The initial model assumes that transitions bring the agent deterministically to the same state"
         for s in range(NUM_STATES):
             for a in range(NUM_ACTIONS):
-                self.model_counts[s, a, s] = 5.0  # 自己遷移のカウント
-                self.model_visits[s, a] = 5.0
+                self.model_counts[s, a, s] = 1.0  # 自己遷移のカウント
+                self.model_visits[s, a] = 1.0
                 self.model_observed[s, a, s] = True  # 初期状態も観測済みとしてマーク
 
     def select_action(self, state: int) -> int:

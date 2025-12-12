@@ -127,12 +127,14 @@ def run_prioritized_sweeping(
     num_actions, 
     n_sweeps, 
     t_mb,
+    discount,  # 割引率
     rand_vals  # 事前生成された乱数配列 (長さ = n_sweeps)
 ):
     """
     Numba対応版 Early Interrupted Stochastic Prioritized Sweeping.
     - q_mb: (num_states, num_actions) に対して、選ばれた状態のみバックアップを書き込む
     - model_counts, model_rewards: shape (num_states, num_actions, num_states)
+    - discount: 割引率 (gamma)
     - rand_vals: 一様乱数 [0,1) の配列（長さ >= n_sweeps）
     """
     # 局所変数初期化
@@ -201,7 +203,7 @@ def run_prioritized_sweeping(
                 p = cnt / denom
                 # 期待報酬: model_rewards / cnt (累積報酬をカウントで割る)
                 r_avg = model_rewards[s_tilde, a, sp] / cnt
-                q_val += p * (r_avg + V[sp])
+                q_val += p * (r_avg + DISCOUNT * V[sp])
             q_temp[a] = q_val
 
         # 書き込み：q_mb の s_tilde 行だけ更新（論文疑似コードに準拠）
@@ -402,6 +404,8 @@ class HybridAgent:
         self.model_rewards = np.zeros((NUM_STATES, NUM_ACTIONS, NUM_STATES), dtype=np.float64)
         # その状態・行動を何回試したかの合計
         self.model_visits = np.zeros((NUM_STATES, NUM_ACTIONS), dtype=np.float64)
+        # 観測済みの遷移を記録するフラグ(減衰後の再初期化を防ぐため)
+        self.model_observed = np.zeros((NUM_STATES, NUM_ACTIONS, NUM_STATES), dtype=bool)
         
         # 初期モデル: 全ての行動が自己遷移すると仮定 (論文準拠)
         # "The initial model assumes that transitions bring the agent deterministically to the same state"
@@ -409,6 +413,7 @@ class HybridAgent:
             for a in range(NUM_ACTIONS):
                 self.model_counts[s, a, s] = 5.0  # 自己遷移のカウント
                 self.model_visits[s, a] = 5.0
+                self.model_observed[s, a, s] = True  # 初期状態も観測済みとしてマーク
 
     def select_action(self, state: int) -> int:
         # MB Planning (JIT function call)
@@ -443,24 +448,20 @@ class HybridAgent:
         # 2. 新規遷移の検出と初期カウント設定
         # "The first time a new transition is observed an initial count is set to 5"
         # 論文の "while keeping a degree of uncertainty" を守るため、
-        if self.model_counts[state, action, next_state] < 0.5:
-            # 観測した遷移を 5.0 にセット
+        # 観測済みフラグをチェックして、減衰後の再初期化を防ぐ
+        if not self.model_observed[state, action, next_state]:
+            # 真の新規遷移: 初期カウントを設定
             self.model_counts[state, action, next_state] = INITIAL_TRANSITION_COUNT
             # 報酬もカウントに合わせてスケールして記録
             self.model_rewards[state, action, next_state] = reward * INITIAL_TRANSITION_COUNT
-            
-        else:
-            # 既に知っている遷移なら、カウントを +1 するだけ
-            self.model_counts[state, action, next_state] += 1.0
-            self.model_rewards[state, action, next_state] += reward
-
-        # model_counts の変更は単位 "1" または "INITIAL_TRANSITION_COUNT" で行うため
-        # model_visits も同じスケールで更新して和と整合させる。
-        # 新規遷移時は model_counts を INITIAL_TRANSITION_COUNT にセットしているため
-        # visits も同量だけ増やす。
-        if self.model_counts[state, action, next_state] == INITIAL_TRANSITION_COUNT:
+            # 観測済みとしてマーク
+            self.model_observed[state, action, next_state] = True
+            # visits も初期カウント分増やす
             self.model_visits[state, action] += INITIAL_TRANSITION_COUNT
         else:
+            # 既に観測済みの遷移: カウントを +1 するだけ
+            self.model_counts[state, action, next_state] += 1.0
+            self.model_rewards[state, action, next_state] += reward
             self.model_visits[state, action] += 1.0
 
     def _plan_q_values(self):
@@ -480,6 +481,7 @@ class HybridAgent:
             NUM_ACTIONS,
             N_PRIORITIZED_SWEEPS,
             T_MB,
+            DISCOUNT,
             rand_vals
         )
 
@@ -613,7 +615,6 @@ def simulate(
                                  (next_state == STATE_DRUG or next_state in STATE_AFTER_SET):
                                 # アフターエフェクト区域内に留まった場合（罰則-1.2を受ける）
                                 counts.drug_choices += 1
-                                # pass
                             elif (state == STATE_GOAL and action == ACTION_GOAL 
                                   and next_state == STATE_START):
                                 counts.healthy_choices += 1
@@ -661,8 +662,8 @@ def simulate(
 
 def main():
     parser = argparse.ArgumentParser(description="Fast Hybrid RL Addiction Simulation")
-    parser.add_argument("--num-agents", type=int, default=900, help="Agents per seed")
-    parser.add_argument("--num-runs", type=int, default=1, help="Number of seeds")
+    parser.add_argument("--num-agents", type=int, default=300, help="Agents per seed")
+    parser.add_argument("--num-runs", type=int, default=10, help="Number of seeds")
     parser.add_argument("--seed", type=int, default=42, help="Base random seed")
     parser.add_argument(
         "--mb-forget",

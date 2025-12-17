@@ -114,9 +114,7 @@ PHASES: Tuple[Tuple[str, int, float], ...] = (
 # 報酬テーブルの事前構築
 PHASE_REWARD_TABLE = np.zeros((len(PHASES), NUM_STATES)) #2x22
 PHASE_DRUG_REWARDS = np.array([phase[2] for phase in PHASES], dtype=np.float64) #[0.0, 10.0]
-for idx in range(len(PHASES)):
-    PHASE_REWARD_TABLE[idx, STATE_DRUG] = AFTER_PHASE_REWARDS[idx] #Drug状態の報酬
-    PHASE_REWARD_TABLE[idx, list(STATE_AFTEREFFECTS)] = AFTER_PHASE_REWARDS[idx] #アフターエフェクト区間の状態に罰を定義
+# アフターエフェクト区間の報酬は_reward関数内で動的に計算するため、ここでは設定しない
 
 
 # ==========================================
@@ -235,9 +233,6 @@ def run_prioritized_sweeping(
         h = np.zeros(num_states, dtype=np.float64)
         # For each predecessor state s, find max_a P(s_tilde | s, a)
         for s in range(num_states):
-            # 自己遷移を除外: s == s_tilde の場合はスキップ
-            if s == s_tilde:
-                continue
                 
             max_p = 0.0
             for a in range(num_actions):
@@ -386,11 +381,14 @@ class AddictionEnvironment:
         if (current_state in STATE_NEUTRAL_SET and next_state in STATE_NEUTRAL_SET 
             and abs(next_state - current_state) > 1):
             r += R_SKIP_LONG
-            
-        # Drug/Aftereffect から Neutral/Goal への遷移 (離脱時の罰則)
-        if (current_state in STATE_DRUG_AFTEREFFECT_SET and 
-            (next_state in STATE_NEUTRAL_SET or next_state == STATE_GOAL or next_state == STATE_GOAL_ENTRY)):
-            r += R_P
+        
+        # アフターエフェクト区間での報酬設計
+        if current_state in STATE_DRUG_AFTEREFFECT_SET:
+            if next_state == STATE_START:  # 状態4への遷移
+                r += R_P  # -4 (f1, f2共通)
+            elif next_state in STATE_DRUG_AFTEREFFECT_SET:  # アフターエフェクト区間内での遷移
+                r += AFTER_PHASE_REWARDS[phase_idx]  # f1: -0.3, f2: -1.2
+            # それ以外(Neutral/Goalへの遷移)は報酬0
             
         return r
 

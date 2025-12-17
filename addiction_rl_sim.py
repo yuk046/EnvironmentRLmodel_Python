@@ -28,6 +28,9 @@ STATE_AFTEREFFECTS = tuple(range(8, 22))
 STATE_AFTER_SET = set(STATE_AFTEREFFECTS)
 AFTER_MAX = STATE_AFTEREFFECTS[-1]
 
+# Drug/After-effect区間（State 7を含む）
+STATE_DRUG_AFTEREFFECT_SET = {STATE_DRUG} | STATE_AFTER_SET
+
 # アフターエフェクト区間でのループを定義
 def aftereffect_forward_state(state: int) -> int:
     if state >= AFTER_MAX:
@@ -97,7 +100,7 @@ AFTER_AS_EXIT = [0.001, 0.001]
 AW_FORWARD = [0.4995, 0.4995]
 AW_BACKWARD = [0.4995, 0.4995]
 # 状態15(14)での特別遷移
-AW_SPECIAL_MOVE = [0.2, 0.2]
+AW_SPECIAL_MOVE = [0.4, 0.4]
 AW_SPECIAL_EXIT = [0.6, 0.6]
 AD_FORWARD = [0.745, 0.745]
 AD_BACKWARD = [0.245, 0.245]
@@ -112,6 +115,7 @@ PHASES: Tuple[Tuple[str, int, float], ...] = (
 PHASE_REWARD_TABLE = np.zeros((len(PHASES), NUM_STATES)) #2x22
 PHASE_DRUG_REWARDS = np.array([phase[2] for phase in PHASES], dtype=np.float64) #[0.0, 10.0]
 for idx in range(len(PHASES)):
+    PHASE_REWARD_TABLE[idx, STATE_DRUG] = AFTER_PHASE_REWARDS[idx] #Drug状態の報酬
     PHASE_REWARD_TABLE[idx, list(STATE_AFTEREFFECTS)] = AFTER_PHASE_REWARDS[idx] #アフターエフェクト区間の状態に罰を定義
 
 
@@ -335,16 +339,18 @@ class AddictionEnvironment:
         if action == ACTION_AW:
             # Special State (分岐点)
             if state == STATE_AW_SPECIAL:
-                p_move = AW_SPECIAL_MOVE[phase_idx] / 2.0
-                if roll < p_move:
+                # 論文準拠: 左右への移動確率を計0.4 (片側0.2) に変更
+                # 元コード: p_move = AW_SPECIAL_MOVE[phase_idx] / 2.0 (0.1)
+                
+                p_move_each = 0.2  # ここを 0.1 から 0.2 に変更
+                
+                if roll < p_move_each:
                     return max(STATE_DRUG, state - 1)
-                roll -= p_move
-                if roll < p_move:
+                roll -= p_move_each
+                if roll < p_move_each:
                     return min(AFTER_MAX, state + 1)
-                roll -= p_move
-                if roll < AW_SPECIAL_EXIT[phase_idx]:
-                    return STATE_START
-                return state
+                # 残り (0.6) は全て脱出。留まる確率は0にする。
+                return STATE_START
             
             # Normal Aftereffect State
             if roll < AW_FORWARD[phase_idx]:
@@ -372,12 +378,9 @@ class AddictionEnvironment:
         # 状態0でagした際
         if current_state == STATE_GOAL and action == ACTION_GOAL and next_state == STATE_START:
             r += R_G
-        # 状態6でadした際
+        # 状態6でadした際（薬物報酬）
         elif (current_state == NEUTRAL_MAX and action == ACTION_DRUG and next_state == STATE_DRUG):
             r += PHASE_DRUG_REWARDS[phase_idx]
-        # 状態７から７への移動
-        elif current_state == STATE_DRUG and next_state == STATE_DRUG:
-            r += AFTER_PHASE_REWARDS[phase_idx]
         
         # Neutralエリアでのロングジャンプ失敗コストなどは簡略化のため省略せず実装
         if (current_state in STATE_NEUTRAL_SET and next_state in STATE_NEUTRAL_SET 
@@ -385,7 +388,7 @@ class AddictionEnvironment:
             r += R_SKIP_LONG
             
         # Drug/Aftereffect から Neutral/Goal への遷移 (離脱時の罰則)
-        if ((current_state == STATE_DRUG or current_state in STATE_AFTER_SET) and 
+        if (current_state in STATE_DRUG_AFTEREFFECT_SET and 
             (next_state in STATE_NEUTRAL_SET or next_state == STATE_GOAL or next_state == STATE_GOAL_ENTRY)):
             r += R_P
             
@@ -667,8 +670,8 @@ def simulate(
 
 def main():
     parser = argparse.ArgumentParser(description="Fast Hybrid RL Addiction Simulation")
-    parser.add_argument("--num-agents", type=int, default=300, help="Agents per seed")
-    parser.add_argument("--num-runs", type=int, default=10, help="Number of seeds")
+    parser.add_argument("--num-agents", type=int, default=900, help="Agents per seed")
+    parser.add_argument("--num-runs", type=int, default=1, help="Number of seeds")
     parser.add_argument("--seed", type=int, default=42, help="Base random seed")
     parser.add_argument(
         "--mb-forget",

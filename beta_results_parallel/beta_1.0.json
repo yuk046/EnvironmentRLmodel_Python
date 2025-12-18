@@ -1,0 +1,17 @@
+{
+  "beta_values": [
+    1.0
+  ],
+  "mean_rates": [
+    64.33333333333333
+  ],
+  "run_rates": [
+    [
+      64.33333333333333
+    ]
+  ],
+  "num_agents": 900,
+  "num_runs": 1,
+  "seed": 42,
+  "mb_forget": true
+}

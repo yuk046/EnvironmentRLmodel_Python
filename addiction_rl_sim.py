@@ -672,6 +672,18 @@ def main():
     parser.add_argument("--num-runs", type=int, default=1, help="Number of seeds")
     parser.add_argument("--seed", type=int, default=42, help="Base random seed")
     parser.add_argument(
+        "--beta",
+        type=float,
+        default=None,
+        help="Single beta value to run (if specified, only this beta will be simulated)",
+    )
+    parser.add_argument(
+        "--output",
+        type=str,
+        default=None,
+        help="Output file for results (JSON format with beta, rates, and run details)",
+    )
+    parser.add_argument(
         "--mb-forget",
         action="store_true",
         help="Reset MB Q-values every planning call instead of gradual decay",
@@ -692,7 +704,12 @@ def main():
     args = parser.parse_args()
 
     # Beta値の範囲
-    beta_values = [0.0, 0.2, 0.4, 0.6, 0.8, 1.0]
+    if args.beta is not None:
+        # 単一のβ値を実行
+        beta_values = [args.beta]
+    else:
+        # 全β値を実行
+        beta_values = [0.0, 0.2, 0.4, 0.6, 0.8, 1.0]
     rates = []
 
     print(f"Simulation Start: Agents={args.num_agents}, Runs={args.num_runs}, Seed={args.seed}")
@@ -732,6 +749,23 @@ def main():
         all_run_rates.append([r * 100.0 for r in run_rates])
         print(f"Result: Beta={beta:.1f} => Addiction Rate={mean_percent:.2f}% (mean over runs)")
         print("-" * 60)
+
+    # 結果をファイルに出力（並列実行用）
+    if args.output is not None:
+        import json
+        output_data = {
+            "beta_values": beta_values,
+            "mean_rates": rates,
+            "run_rates": all_run_rates,
+            "num_agents": args.num_agents,
+            "num_runs": args.num_runs,
+            "seed": args.seed,
+            "mb_forget": args.mb_forget,
+        }
+        with open(args.output, 'w') as f:
+            json.dump(output_data, f, indent=2)
+        print(f"Results saved to {args.output}")
+        return  # ファイル出力時はグラフを描画しない
 
     # グラフ描画: run毎の率から平均 ± SEM を描画し、平均線を太くする
     means = np.array(rates)

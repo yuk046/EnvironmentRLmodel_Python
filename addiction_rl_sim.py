@@ -51,6 +51,11 @@ EPSILON = 0.1        # 探索率
 N_PRIORITIZED_SWEEPS = 50 #思考回数
 T_MB = 1.0           # Softmax temperature for planning
 
+# β学習用のパラメータ
+BETA_VALUES = np.array([0.0, 0.2, 0.4, 0.6, 0.8, 1.0], dtype=np.float64)  # β候補値
+ALPHA_BETA = 0.1     # βのQ学習率
+EPSILON_BETA = 0.1   # β選択時の探索率
+
 # 報酬設定
 R_G = 1.0            # Goal reward
 R_P = -4.0           # Punishment (shock)
@@ -272,6 +277,14 @@ class PhaseResult:
     drug_choices: int = 0
     healthy_choices: int = 0
 
+@dataclass
+class BetaStatistics:
+    """β選択の統計情報"""
+    beta_history: List[float]  # 各ステップでのβ値
+    state_history: List[int]   # 各ステップでの状態
+    phase_history: List[int]   # 各ステップでのフェーズ
+    step_history: List[int]    # グローバルステップ番号
+
 class AddictionEnvironment:
     def __init__(self, rng: np.random.Generator):
         self.state = STATE_START
@@ -394,14 +407,19 @@ class AddictionEnvironment:
 
 
 class HybridAgent:
-    def __init__(self, beta: float, rng: np.random.Generator, mb_forget: bool = False):
-        self.beta = beta
+    def __init__(self, rng: np.random.Generator, mb_forget: bool = False):
         self.rng = rng
         self.mb_forget = mb_forget
         
         # Qテーブル (MF, MB)
         self.q_mf = np.zeros((NUM_STATES, NUM_ACTIONS), dtype=np.float64)
         self.q_mb = np.zeros((NUM_STATES, NUM_ACTIONS), dtype=np.float64)
+        
+        # β学習用のQ値テーブル (各状態でどのβ値を選ぶべきかを学習)
+        self.q_beta = np.zeros((NUM_STATES, len(BETA_VALUES)), dtype=np.float64)
+        self.current_beta_idx = 0  # 現在選択されているβのインデックス
+        self.prev_state = None  # β選択のQ学習用に前の状態を記憶
+        self.prev_beta_idx = None  # β選択のQ学習用に前のβインデックスを記憶
         
         # メンタルモデル (Numba用にfloat64で定義)
         # [今の状態, 行動, 次の状態] に何回遷移したかを記録する3次元配列
@@ -421,7 +439,22 @@ class HybridAgent:
                 self.model_visits[s, a] = 1.0
                 self.model_observed[s, a, s] = True  # 初期状態も観測済みとしてマーク
 
+    def select_beta(self, state: int) -> int:
+        """β値を選択する（ε-greedy）"""
+        # ε-Greedy でβを選択
+        if self.rng.random() < EPSILON_BETA:
+            return int(self.rng.integers(len(BETA_VALUES)))
+        
+        # Q値が最大のβを選択
+        max_val = np.max(self.q_beta[state])
+        best_betas = np.flatnonzero(np.isclose(self.q_beta[state], max_val, rtol=1e-08, atol=1e-12))
+        return int(self.rng.choice(best_betas))
+    
     def select_action(self, state: int) -> int:
+        # βを選択
+        self.current_beta_idx = self.select_beta(state)
+        current_beta = BETA_VALUES[self.current_beta_idx]
+        
         # MB Planning (JIT function call)
         self._plan_q_values()
         
@@ -429,8 +462,8 @@ class HybridAgent:
         if self.rng.random() < EPSILON:
             return int(self.rng.integers(NUM_ACTIONS))
             
-        # Hybrid Q-value
-        q_mix = self.beta * self.q_mb[state] + (1.0 - self.beta) * self.q_mf[state]
+        # Hybrid Q-value (選択されたβを使用)
+        q_mix = current_beta * self.q_mb[state] + (1.0 - current_beta) * self.q_mf[state]
         
         # 最も価値が高い行動を選ぶ (Argmax)
         max_val = np.max(q_mix)
@@ -441,6 +474,19 @@ class HybridAgent:
 
     # モデルの学習機構
     def observe(self, state: int, action: int, reward: float, next_state: int, phase_idx: int):
+        # --- β学習の更新 ---
+        if self.prev_state is not None:
+            # 前のステップで選択したβのQ値を更新
+            # TD学習: Q(s, β) ← Q(s, β) + α * (R + γ*max_β' Q(s', β') - Q(s, β))
+            td_target_beta = reward + DISCOUNT * np.max(self.q_beta[next_state])
+            self.q_beta[self.prev_state, self.prev_beta_idx] += ALPHA_BETA * (
+                td_target_beta - self.q_beta[self.prev_state, self.prev_beta_idx]
+            )
+        
+        # 次回のβ更新のために現在の情報を記憶
+        self.prev_state = state
+        self.prev_beta_idx = self.current_beta_idx
+        
         # --- Model-Free (直感) の更新 ---
         # Q学習の式: Q(s,a) ← Q(s,a) + α * (R + γ*maxQ(s') - Q(s,a))
         td_target = reward + DISCOUNT * np.max(self.q_mf[next_state])
@@ -496,7 +542,6 @@ class HybridAgent:
 # 4. シミュレーション実行 & Main
 # ==========================================
 def simulate(
-    beta: float,
     num_agents: int,
     num_runs: int,
     base_seed: int,
@@ -505,13 +550,24 @@ def simulate(
     debug_episode: bool = False,
     debug_csv_path: Optional[str] = None,
     debug_txt_path: Optional[str] = None,
-) -> float:
+    collect_beta_stats: bool = False,
+) -> Tuple[float, List[float], Optional[BetaStatistics]]:
     
     addictions = 0
     total_agents = num_agents * num_runs
     debug_records = []
     # ラン毎の依存者数を記録（後で run ごとの率に変換）
     run_addictions = [0 for _ in range(num_runs)]
+    
+    # β統計収集用（最初のエージェントのみ）
+    beta_stats = None
+    if collect_beta_stats:
+        beta_stats = BetaStatistics(
+            beta_history=[],
+            state_history=[],
+            phase_history=[],
+            step_history=[]
+        )
     
     # テキストログファイルを開く (追記モードではなく新規作成)
     log_file = None
@@ -527,10 +583,13 @@ def simulate(
                 rng = np.random.default_rng(seed_for_agent)
 
                 env = AddictionEnvironment(rng)
-                agent = HybridAgent(beta, rng, mb_forget=mb_forget)
+                agent = HybridAgent(rng, mb_forget=mb_forget)
                 
                 state = env.reset()
                 counts = PhaseResult()
+                
+                # グローバルステップカウンタ
+                global_step = 0
                 
                 # フェーズ実行
                 for phase_idx, (_, length, _) in enumerate(PHASES):
@@ -543,7 +602,7 @@ def simulate(
                     for step_in_phase in range(length):
                         # Progress Log
                         if progress_cb and (step_in_phase + 1) in report_points:
-                            progress_cb(beta, seed_idx, agent_idx, num_agents, num_runs, phase_idx, step_in_phase + 1, length)
+                            progress_cb(seed_idx, agent_idx, num_agents, num_runs, phase_idx, step_in_phase + 1, length)
                         
                         # 行動選択前にQ値を取得したいが、select_action内でMBのPlanningが走るため
                         # select_action後に取得すると、そのステップでのPlanning結果が反映された状態になる
@@ -552,15 +611,26 @@ def simulate(
                         # 行動選択(MBはPlaning)
                         action = agent.select_action(state)
                         
-                        # Debug出力用にQ値を取得 (現在の状態 state における全行動のQ値)
-                        # debug_episodeが有効な場合のみコピーを行う
+                        # β統計収集（最初のエージェントのみ）
+                        if collect_beta_stats and seed_idx == 0 and agent_idx == 0:
+                            selected_beta = BETA_VALUES[agent.current_beta_idx]
+                            beta_stats.beta_history.append(selected_beta)
+                            beta_stats.state_history.append(state)
+                            beta_stats.phase_history.append(phase_idx)
+                            beta_stats.step_history.append(global_step)
+                        
+                        # Debug出力用にβ値とQ値を取得
                         current_q_mf = None
                         current_q_mb = None
                         current_q_mix = None
+                        current_beta_value = None
+                        current_q_beta_values = None
                         if debug_episode and seed_idx == 0 and agent_idx == 0:
                             current_q_mf = agent.q_mf[state].copy()
                             current_q_mb = agent.q_mb[state].copy()
-                            current_q_mix = beta * current_q_mb + (1.0 - beta) * current_q_mf
+                            current_beta_value = BETA_VALUES[agent.current_beta_idx]
+                            current_q_beta_values = agent.q_beta[state].copy()
+                            current_q_mix = current_beta_value * current_q_mb + (1.0 - current_beta_value) * current_q_mf
                         
                         # 行動、学習
                         next_state, reward = env.step(action, phase_idx)
@@ -571,22 +641,32 @@ def simulate(
                             q_mf_str = ", ".join([f"{x:.6f}" for x in current_q_mf])
                             q_mb_str = ", ".join([f"{x:.6f}" for x in current_q_mb])
                             q_mix_str = ", ".join([f"{x:.6f}" for x in current_q_mix])
+                            
+                            log_lines = [
+                                f"[DEBUG] Beta={current_beta_value:.2f} Phase={PHASES[phase_idx][0]} Step={step_in_phase+1}",
+                                f"  State: {state} -> Action: {ACTION_NAMES.get(action, str(action))} -> Next: {next_state} (Reward: {reward})",
+                                f"  Q_MF:  [{q_mf_str}]",
+                                f"  Q_MB:  [{q_mb_str}]",
+                                f"  Q_MIX: [{q_mix_str}]",
+                            ]
+                            
+                            # βのQ値を出力
+                            if current_q_beta_values is not None:
+                                q_beta_str = ", ".join([f"{x:.6f}" for x in current_q_beta_values])
+                                beta_names = ", ".join([f"β={b:.1f}" for b in BETA_VALUES])
+                                log_lines.append(f"  Q_BETA: [{q_beta_str}] ({beta_names})")
+                            
                             # 現在の状態と行動に紐づくMBモデル（遷移カウントと累積報酬）も併せて出力
                             curr_model_counts = agent.model_counts[state, action].copy()
                             curr_model_rewards = agent.model_rewards[state, action].copy()
                             model_counts_str = ", ".join([f"{x:.3f}" for x in curr_model_counts])
                             model_rewards_str = ", ".join([f"{x:.3f}" for x in curr_model_rewards])
                             
-                            log_lines = [
-                                f"[DEBUG] Beta={beta:.1f} Phase={PHASES[phase_idx][0]} Step={step_in_phase+1}",
-                                f"  State: {state} -> Action: {ACTION_NAMES.get(action, str(action))} -> Next: {next_state} (Reward: {reward})",
-                                f"  Q_MF:  [{q_mf_str}]",
-                                f"  Q_MB:  [{q_mb_str}]",
-                                f"  Q_MIX: [{q_mix_str}]",
+                            log_lines.extend([
                                 f"  MODEL_COUNTS(s,a,*):  [{model_counts_str}]",
                                 f"  MODEL_REWARDS(s,a,*): [{model_rewards_str}]",
                                 "-" * 40
-                            ]
+                            ])
                             
                             # コンソール出力
                             for line in log_lines:
@@ -626,6 +706,7 @@ def simulate(
                                 counts.healthy_choices += 1
                                 
                         state = next_state
+                        global_step += 1
                 
                 # 依存判定
                 if counts.drug_choices > counts.healthy_choices:
@@ -663,25 +744,241 @@ def simulate(
     # run ごとの率を計算して返す
     run_rates = [cnt / num_agents for cnt in run_addictions]
     overall_rate = addictions / total_agents
-    return overall_rate, run_rates
+    return overall_rate, run_rates, beta_stats
+
+
+
+
+def plot_beta_analysis(beta_stats: BetaStatistics, output_prefix: str = "beta_analysis"):
+    """β選択の分析グラフを複数作成"""
+    import matplotlib.pyplot as plt
+    from matplotlib.gridspec import GridSpec
+    
+    beta_array = np.array(beta_stats.beta_history)
+    state_array = np.array(beta_stats.state_history)
+    phase_array = np.array(beta_stats.phase_history)
+    step_array = np.array(beta_stats.step_history)
+    
+    # ===== Figure 1: β選択の時系列変化 =====
+    fig1 = plt.figure(figsize=(14, 8))
+    gs1 = GridSpec(2, 1, height_ratios=[3, 1], hspace=0.3)
+    
+    # 上段: β値の時系列（フェーズで色分け）
+    ax1_top = fig1.add_subplot(gs1[0])
+    colors = ['#3498db' if p == 0 else '#e74c3c' for p in phase_array]
+    ax1_top.scatter(step_array, beta_array, c=colors, alpha=0.5, s=10, label='Selected β')
+    
+    # 移動平均を追加
+    window = 50
+    if len(beta_array) >= window:
+        beta_smooth = np.convolve(beta_array, np.ones(window)/window, mode='valid')
+        ax1_top.plot(step_array[window-1:], beta_smooth, 'k-', linewidth=2, label=f'Moving Avg (window={window})')
+    
+    # フェーズ境界を描画
+    phase_boundary = np.where(np.diff(phase_array) != 0)[0]
+    for boundary in phase_boundary:
+        ax1_top.axvline(step_array[boundary], color='gray', linestyle='--', alpha=0.5)
+    
+    ax1_top.set_ylabel('Selected β Value', fontsize=12)
+    ax1_top.set_ylim(-0.05, 1.05)
+    ax1_top.set_title('β Selection Over Time (Blue: Pre-drug, Red: Addiction)', fontsize=14, fontweight='bold')
+    ax1_top.legend(loc='upper right')
+    ax1_top.grid(True, alpha=0.3)
+    
+    # 下段: 状態の時系列
+    ax1_bottom = fig1.add_subplot(gs1[1], sharex=ax1_top)
+    ax1_bottom.scatter(step_array, state_array, c=colors, alpha=0.5, s=10)
+    ax1_bottom.set_xlabel('Step', fontsize=12)
+    ax1_bottom.set_ylabel('State', fontsize=12)
+    ax1_bottom.set_title('State Trajectory', fontsize=12)
+    ax1_bottom.grid(True, alpha=0.3)
+    
+    plt.tight_layout()
+    plt.savefig(f"{output_prefix}_timeseries.png", dpi=150, bbox_inches='tight')
+    print(f"Saved: {output_prefix}_timeseries.png")
+    plt.close()
+    
+    # ===== Figure 2: フェーズ別β選択分布 =====
+    fig2, axes2 = plt.subplots(1, 2, figsize=(14, 6))
+    
+    phase_names = ['Pre-drug', 'Addiction']
+    for phase_idx, (ax, phase_name) in enumerate(zip(axes2, phase_names)):
+        mask = phase_array == phase_idx
+        if np.sum(mask) == 0:
+            continue
+        
+        phase_betas = beta_array[mask]
+        
+        # ヒストグラム
+        counts, bins, patches = ax.hist(phase_betas, bins=BETA_VALUES.tolist() + [1.1], 
+                                        align='left', rwidth=0.8, alpha=0.7, 
+                                        color='#3498db' if phase_idx == 0 else '#e74c3c')
+        
+        # 各βの選択頻度を表示
+        for i, beta_val in enumerate(BETA_VALUES):
+            count = np.sum(np.isclose(phase_betas, beta_val))
+            percentage = 100.0 * count / len(phase_betas)
+            ax.text(beta_val, count, f'{percentage:.1f}%', 
+                   ha='center', va='bottom', fontsize=9, fontweight='bold')
+        
+        ax.set_xlabel('β Value', fontsize=12)
+        ax.set_ylabel('Frequency', fontsize=12)
+        ax.set_title(f'{phase_name} Phase (n={len(phase_betas)} steps)', 
+                    fontsize=13, fontweight='bold')
+        ax.set_xticks(BETA_VALUES)
+        ax.grid(True, alpha=0.3, axis='y')
+    
+    plt.tight_layout()
+    plt.savefig(f"{output_prefix}_phase_distribution.png", dpi=150, bbox_inches='tight')
+    print(f"Saved: {output_prefix}_phase_distribution.png")
+    plt.close()
+    
+    # ===== Figure 3: 状態別β選択ヒートマップ =====
+    fig3, ax3 = plt.subplots(figsize=(16, 8))
+    
+    # 各状態でのβ選択頻度をカウント
+    state_beta_matrix = np.zeros((NUM_STATES, len(BETA_VALUES)))
+    for state, beta in zip(state_array, beta_array):
+        beta_idx = np.argmin(np.abs(BETA_VALUES - beta))
+        state_beta_matrix[state, beta_idx] += 1
+    
+    # 各状態で正規化（割合に変換）
+    row_sums = state_beta_matrix.sum(axis=1, keepdims=True)
+    row_sums[row_sums == 0] = 1  # ゼロ除算回避
+    state_beta_matrix_norm = state_beta_matrix / row_sums * 100
+    
+    # ヒートマップ描画
+    im = ax3.imshow(state_beta_matrix_norm.T, aspect='auto', cmap='YlOrRd', 
+                    interpolation='nearest', vmin=0, vmax=100)
+    
+    # カラーバー
+    cbar = plt.colorbar(im, ax=ax3)
+    cbar.set_label('Selection Percentage (%)', fontsize=12)
+    
+    # 軸ラベル
+    ax3.set_xlabel('State', fontsize=12)
+    ax3.set_ylabel('β Value', fontsize=12)
+    ax3.set_title('β Selection Heatmap by State', fontsize=14, fontweight='bold')
+    ax3.set_xticks(range(NUM_STATES))
+    ax3.set_yticks(range(len(BETA_VALUES)))
+    ax3.set_yticklabels([f'{b:.1f}' for b in BETA_VALUES])
+    
+    # 重要な状態を強調表示
+    important_states = [STATE_START, STATE_GOAL_ENTRY, STATE_GOAL, NEUTRAL_MAX, STATE_DRUG]
+    for s in important_states:
+        ax3.axvline(s - 0.5, color='blue', linewidth=2, alpha=0.5)
+    
+    plt.tight_layout()
+    plt.savefig(f"{output_prefix}_state_heatmap.png", dpi=150, bbox_inches='tight')
+    print(f"Saved: {output_prefix}_state_heatmap.png")
+    plt.close()
+    
+    # ===== Figure 4: β選択の全体統計サマリー =====
+    fig4, axes4 = plt.subplots(2, 2, figsize=(14, 10))
+    
+    # (1) 全体のβ分布（円グラフ）
+    ax4_1 = axes4[0, 0]
+    beta_counts = [np.sum(np.isclose(beta_array, b)) for b in BETA_VALUES]
+    colors_pie = plt.cm.viridis(np.linspace(0, 1, len(BETA_VALUES)))
+    wedges, texts, autotexts = ax4_1.pie(beta_counts, labels=[f'β={b:.1f}' for b in BETA_VALUES],
+                                          autopct='%1.1f%%', colors=colors_pie, startangle=90)
+    for autotext in autotexts:
+        autotext.set_color('white')
+        autotext.set_fontweight('bold')
+    ax4_1.set_title('Overall β Distribution', fontsize=13, fontweight='bold')
+    
+    # (2) フェーズごとの平均β
+    ax4_2 = axes4[0, 1]
+    phase_means = [np.mean(beta_array[phase_array == i]) for i in range(len(PHASES))]
+    phase_stds = [np.std(beta_array[phase_array == i]) for i in range(len(PHASES))]
+    bars = ax4_2.bar(phase_names, phase_means, yerr=phase_stds, 
+                     color=['#3498db', '#e74c3c'], alpha=0.7, capsize=10)
+    ax4_2.set_ylabel('Mean β Value', fontsize=12)
+    ax4_2.set_ylim(0, 1)
+    ax4_2.set_title('Average β by Phase', fontsize=13, fontweight='bold')
+    ax4_2.grid(True, alpha=0.3, axis='y')
+    
+    # 値を表示
+    for bar, mean, std in zip(bars, phase_means, phase_stds):
+        ax4_2.text(bar.get_x() + bar.get_width()/2, bar.get_height() + std + 0.02, 
+                  f'{mean:.3f}±{std:.3f}', ha='center', va='bottom', fontweight='bold')
+    
+    # (3) 状態タイプ別の平均β
+    ax4_3 = axes4[1, 0]
+    state_types = {
+        'Goal (0)': [STATE_GOAL],
+        'Neutral (1-6)': list(STATE_NEUTRALS),
+        'Drug (7)': [STATE_DRUG],
+        'After (8-21)': list(STATE_AFTEREFFECTS)
+    }
+    type_means = []
+    type_stds = []
+    type_labels = []
+    for label, states in state_types.items():
+        mask = np.isin(state_array, states)
+        if np.sum(mask) > 0:
+            type_means.append(np.mean(beta_array[mask]))
+            type_stds.append(np.std(beta_array[mask]))
+            type_labels.append(label)
+    
+    bars3 = ax4_3.barh(type_labels, type_means, xerr=type_stds, 
+                       color=['#2ecc71', '#f39c12', '#e74c3c', '#9b59b6'], 
+                       alpha=0.7, capsize=10)
+    ax4_3.set_xlabel('Mean β Value', fontsize=12)
+    ax4_3.set_xlim(0, 1)
+    ax4_3.set_title('Average β by State Type', fontsize=13, fontweight='bold')
+    ax4_3.grid(True, alpha=0.3, axis='x')
+    
+    # (4) β値の推移（学習曲線）
+    ax4_4 = axes4[1, 1]
+    n_bins = 20
+    steps_per_bin = len(step_array) // n_bins
+    if steps_per_bin > 0:
+        bin_means = []
+        bin_steps = []
+        for i in range(n_bins):
+            start_idx = i * steps_per_bin
+            end_idx = (i + 1) * steps_per_bin if i < n_bins - 1 else len(step_array)
+            bin_means.append(np.mean(beta_array[start_idx:end_idx]))
+            bin_steps.append(np.mean(step_array[start_idx:end_idx]))
+        
+        ax4_4.plot(bin_steps, bin_means, 'o-', linewidth=2, markersize=8, color='#e67e22')
+        ax4_4.set_xlabel('Step', fontsize=12)
+        ax4_4.set_ylabel('Mean β Value', fontsize=12)
+        ax4_4.set_ylim(0, 1)
+        ax4_4.set_title('β Learning Curve (binned average)', fontsize=13, fontweight='bold')
+        ax4_4.grid(True, alpha=0.3)
+    
+    plt.tight_layout()
+    plt.savefig(f"{output_prefix}_summary.png", dpi=150, bbox_inches='tight')
+    print(f"Saved: {output_prefix}_summary.png")
+    plt.close()
+    
+    print("\n" + "="*60)
+    print("β SELECTION STATISTICS")
+    print("="*60)
+    print(f"Total steps analyzed: {len(beta_array)}")
+    print(f"\nOverall β statistics:")
+    print(f"  Mean: {np.mean(beta_array):.3f} ± {np.std(beta_array):.3f}")
+    print(f"  Median: {np.median(beta_array):.3f}")
+    print(f"  Min: {np.min(beta_array):.3f}, Max: {np.max(beta_array):.3f}")
+    print(f"\nβ selection frequency:")
+    for beta_val in BETA_VALUES:
+        count = np.sum(np.isclose(beta_array, beta_val))
+        percentage = 100.0 * count / len(beta_array)
+        print(f"  β={beta_val:.1f}: {count:6d} times ({percentage:5.2f}%)")
 
 
 def main():
-    parser = argparse.ArgumentParser(description="Fast Hybrid RL Addiction Simulation")
+    parser = argparse.ArgumentParser(description="Fast Hybrid RL Addiction Simulation with Beta Learning")
     parser.add_argument("--num-agents", type=int, default=900, help="Agents per seed")
     parser.add_argument("--num-runs", type=int, default=1, help="Number of seeds")
     parser.add_argument("--seed", type=int, default=42, help="Base random seed")
     parser.add_argument(
-        "--beta",
-        type=float,
-        default=None,
-        help="Single beta value to run (if specified, only this beta will be simulated)",
-    )
-    parser.add_argument(
         "--output",
         type=str,
         default=None,
-        help="Output file for results (JSON format with beta, rates, and run details)",
+        help="Output file for results (JSON format)",
     )
     parser.add_argument(
         "--mb-forget",
@@ -699,99 +996,84 @@ def main():
         nargs="?",
         const=None,
         default=None,
-        help="Path to write debug episode transitions as CSV (default: ./debug_episode_beta_<beta>.csv)",
+        help="Path to write debug episode transitions as CSV (default: ./debug_episode_learn_beta.csv)",
+    )
+    parser.add_argument(
+        "--plot-beta",
+        action="store_true",
+        help="Generate β selection analysis plots",
+    )
+    parser.add_argument(
+        "--plot-prefix",
+        type=str,
+        default="beta_analysis",
+        help="Prefix for output plot files (default: beta_analysis)",
     )
     args = parser.parse_args()
 
-    # Beta値の範囲
-    if args.beta is not None:
-        # 単一のβ値を実行
-        beta_values = [args.beta]
-    else:
-        # 全β値を実行
-        beta_values = [0.0, 0.2, 0.4, 0.6, 0.8, 1.0]
-    rates = []
-
     print(f"Simulation Start: Agents={args.num_agents}, Runs={args.num_runs}, Seed={args.seed}")
+    print(f"Beta Learning Mode: Enabled (learning optimal β for each state)")
     print("-" * 60)
 
-    def log_progress(beta, seed, agent, n_agents, n_runs, p_idx, step, length):
+    def log_progress(seed, agent, n_agents, n_runs, p_idx, step, length):
         # 進捗表示 (間引いて表示)
         if seed == 0 and agent == 0 and step % 100 == 0:
             p_name = PHASES[p_idx][0]
-            print(f"[Beta={beta:.1f}] Phase: {p_name} Step: {step}/{length}")
+            print(f"Phase: {p_name} Step: {step}/{length}")
 
-    for beta in beta_values:
-        # デバッグログのファイル名を生成
-        debug_txt_path = None
-        if args.debug_episode:
-            debug_txt_path = f"debug_log_beta_{beta:.2f}.txt"
+    # デバッグログのファイル名を生成
+    debug_txt_path = None
+    if args.debug_episode:
+        debug_txt_path = "debug_log_learn_beta.txt"
 
-        overall_rate, run_rates = simulate(
-            beta,
-            args.num_agents,
-            args.num_runs,
-            args.seed,  # use the same base seed for paired comparisons across betas
-            log_progress,
-            mb_forget=args.mb_forget,
-            debug_episode=args.debug_episode,
-            debug_csv_path=args.debug_csv,
-            debug_txt_path=debug_txt_path,
-        )
-        # keep base seed unchanged so pairing holds across betas
-        # run_rates: list of length num_runs with rates in [0,1]
-        mean_percent = np.mean(run_rates) * 100.0
-        rates.append(mean_percent)
-        # store run-level rates (as percent) for plotting error bars
-        # convert to percent and keep in a separate list parallel to beta_values
-        if 'all_run_rates' not in locals():
-            all_run_rates = []
-        all_run_rates.append([r * 100.0 for r in run_rates])
-        print(f"Result: Beta={beta:.1f} => Addiction Rate={mean_percent:.2f}% (mean over runs)")
-        print("-" * 60)
+    overall_rate, run_rates, beta_stats = simulate(
+        args.num_agents,
+        args.num_runs,
+        args.seed,
+        log_progress,
+        mb_forget=args.mb_forget,
+        debug_episode=args.debug_episode,
+        debug_csv_path=args.debug_csv,
+        debug_txt_path=debug_txt_path,
+        collect_beta_stats=args.plot_beta,
+    )
+    
+    mean_percent = np.mean(run_rates) * 100.0
+    print(f"Result: Addiction Rate={mean_percent:.2f}% (mean over runs)")
+    print("-" * 60)
 
     # 結果をファイルに出力（並列実行用）
     if args.output is not None:
         import json
         output_data = {
-            "beta_values": beta_values,
-            "mean_rates": rates,
-            "run_rates": all_run_rates,
+            "addiction_rate": mean_percent,
+            "run_rates": [r * 100.0 for r in run_rates],
             "num_agents": args.num_agents,
             "num_runs": args.num_runs,
             "seed": args.seed,
             "mb_forget": args.mb_forget,
+            "beta_learning": True,
         }
         with open(args.output, 'w') as f:
             json.dump(output_data, f, indent=2)
         print(f"Results saved to {args.output}")
-        return  # ファイル出力時はグラフを描画しない
+        return
 
-    # グラフ描画: run毎の率から平均 ± SEM を描画し、平均線を太くする
-    means = np.array(rates)
-    # all_run_rates: list[num_betas][num_runs]
-    run_matrix = np.array(all_run_rates)  # shape: (num_betas, num_runs)
-    sems = np.std(run_matrix, axis=1, ddof=1) / np.sqrt(run_matrix.shape[1])
-
-    plt.figure(figsize=(8, 5))
-    # 薄い点で各 run の値をプロット（軽く横にジッタ）
-    for i, vals in enumerate(run_matrix):
-        x = np.full(len(vals), beta_values[i]) + (np.random.random(len(vals)) - 0.5) * 0.01
-        plt.scatter(x, vals, color='gray', alpha=0.25, s=10)
-
-    # 平均 ± SEM を太い色強い線で描画
-    plt.errorbar(beta_values, means, yerr=sems, fmt='-o', color='C0', ecolor='C0', elinewidth=1.5, capsize=4, linewidth=3, markersize=6, label='Mean ± SEM')
-    plt.title(f"Transition to Addiction (N={args.num_agents * args.num_runs})")
-    plt.xlabel("Degree of MB Control (Beta)")
-    plt.ylabel("Addiction Rate (%)")
-    plt.ylim(0, 100)
-    plt.grid(True, linestyle="--", alpha=0.6)
-    plt.legend()
-    plt.tight_layout()
+    # 簡易統計表示
+    print("\n" + "=" * 60)
+    print("SUMMARY")
+    print("=" * 60)
+    print(f"Overall Addiction Rate: {mean_percent:.2f}%")
+    print(f"Standard Error: {np.std(run_rates) * 100.0 / np.sqrt(len(run_rates)):.2f}%")
+    print(f"Min Rate: {np.min(run_rates) * 100.0:.2f}%")
+    print(f"Max Rate: {np.max(run_rates) * 100.0:.2f}%")
     
-    # 画像保存または表示
-    # plt.savefig("addiction_result.png")
-    plt.show()
+    # β選択の分析グラフを生成
+    if args.plot_beta and beta_stats is not None:
+        print("\n" + "="*60)
+        print("Generating β selection analysis plots...")
+        print("="*60)
+        plot_beta_analysis(beta_stats, output_prefix=args.plot_prefix)
 
 if __name__ == "__main__":
     main()

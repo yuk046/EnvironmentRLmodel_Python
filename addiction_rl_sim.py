@@ -279,11 +279,13 @@ class PhaseResult:
 
 @dataclass
 class BetaStatistics:
-    """β選択の統計情報"""
-    beta_history: List[float]  # 各ステップでのβ値
-    state_history: List[int]   # 各ステップでの状態
-    phase_history: List[int]   # 各ステップでのフェーズ
-    step_history: List[int]    # グローバルステップ番号
+    """β選択の統計情報（全エージェント）"""
+    beta_history_all: List[List[float]]  # 各エージェントの各ステップでのβ値
+    state_history_all: List[List[int]]   # 各エージェントの各ステップでの状態
+    phase_history_all: List[List[int]]   # 各エージェントの各ステップでのフェーズ
+    step_history: List[int]              # グローバルステップ番号（全エージェント共通）
+    addiction_status: List[bool]         # 各エージェントが依存症になったか
+    num_agents: int                      # 収集したエージェント数
 
 class AddictionEnvironment:
     def __init__(self, rng: np.random.Generator):
@@ -415,10 +417,9 @@ class HybridAgent:
         self.q_mf = np.zeros((NUM_STATES, NUM_ACTIONS), dtype=np.float64)
         self.q_mb = np.zeros((NUM_STATES, NUM_ACTIONS), dtype=np.float64)
         
-        # β学習用のQ値テーブル (各状態でどのβ値を選ぶべきかを学習)
-        self.q_beta = np.zeros((NUM_STATES, len(BETA_VALUES)), dtype=np.float64)
+        # β学習用のQ値テーブル (どのβ値を選ぶべきかをグローバルに学習)
+        self.q_beta = np.zeros(len(BETA_VALUES), dtype=np.float64)
         self.current_beta_idx = 0  # 現在選択されているβのインデックス
-        self.prev_state = None  # β選択のQ学習用に前の状態を記憶
         self.prev_beta_idx = None  # β選択のQ学習用に前のβインデックスを記憶
         
         # メンタルモデル (Numba用にfloat64で定義)
@@ -439,20 +440,20 @@ class HybridAgent:
                 self.model_visits[s, a] = 1.0
                 self.model_observed[s, a, s] = True  # 初期状態も観測済みとしてマーク
 
-    def select_beta(self, state: int) -> int:
+    def select_beta(self) -> int:
         """β値を選択する（ε-greedy）"""
         # ε-Greedy でβを選択
         if self.rng.random() < EPSILON_BETA:
             return int(self.rng.integers(len(BETA_VALUES)))
         
         # Q値が最大のβを選択
-        max_val = np.max(self.q_beta[state])
-        best_betas = np.flatnonzero(np.isclose(self.q_beta[state], max_val, rtol=1e-08, atol=1e-12))
+        max_val = np.max(self.q_beta)
+        best_betas = np.flatnonzero(np.isclose(self.q_beta, max_val, rtol=1e-08, atol=1e-12))
         return int(self.rng.choice(best_betas))
     
     def select_action(self, state: int) -> int:
-        # βを選択
-        self.current_beta_idx = self.select_beta(state)
+        # βを選択（状態に関係なくグローバルに選択）
+        self.current_beta_idx = self.select_beta()
         current_beta = BETA_VALUES[self.current_beta_idx]
         
         # MB Planning (JIT function call)
@@ -475,16 +476,15 @@ class HybridAgent:
     # モデルの学習機構
     def observe(self, state: int, action: int, reward: float, next_state: int, phase_idx: int):
         # --- β学習の更新 ---
-        if self.prev_state is not None:
+        if self.prev_beta_idx is not None:
             # 前のステップで選択したβのQ値を更新
-            # TD学習: Q(s, β) ← Q(s, β) + α * (R + γ*max_β' Q(s', β') - Q(s, β))
-            td_target_beta = reward + DISCOUNT * np.max(self.q_beta[next_state])
-            self.q_beta[self.prev_state, self.prev_beta_idx] += ALPHA_BETA * (
-                td_target_beta - self.q_beta[self.prev_state, self.prev_beta_idx]
+            # TD学習: Q(β) ← Q(β) + α * (R + γ*max_β' Q(β') - Q(β))
+            td_target_beta = reward + DISCOUNT * np.max(self.q_beta)
+            self.q_beta[self.prev_beta_idx] += ALPHA_BETA * (
+                td_target_beta - self.q_beta[self.prev_beta_idx]
             )
         
-        # 次回のβ更新のために現在の情報を記憶
-        self.prev_state = state
+        # 次回のβ更新のために現在のβインデックスを記憶
         self.prev_beta_idx = self.current_beta_idx
         
         # --- Model-Free (直感) の更新 ---
@@ -559,14 +559,16 @@ def simulate(
     # ラン毎の依存者数を記録（後で run ごとの率に変換）
     run_addictions = [0 for _ in range(num_runs)]
     
-    # β統計収集用（最初のエージェントのみ）
+    # β統計収集用（全エージェント）
     beta_stats = None
     if collect_beta_stats:
         beta_stats = BetaStatistics(
-            beta_history=[],
-            state_history=[],
-            phase_history=[],
-            step_history=[]
+            beta_history_all=[],
+            state_history_all=[],
+            phase_history_all=[],
+            step_history=[],
+            addiction_status=[],
+            num_agents=0
         )
     
     # テキストログファイルを開く (追記モードではなく新規作成)
@@ -591,6 +593,11 @@ def simulate(
                 # グローバルステップカウンタ
                 global_step = 0
                 
+                # 各エージェントのβ履歴（β統計収集用）
+                agent_beta_history = [] if collect_beta_stats else None
+                agent_state_history = [] if collect_beta_stats else None
+                agent_phase_history = [] if collect_beta_stats else None
+                
                 # フェーズ実行
                 for phase_idx, (_, length, _) in enumerate(PHASES):
                     # フェーズ開始時にSTATE_STARTにリセット
@@ -611,13 +618,15 @@ def simulate(
                         # 行動選択(MBはPlaning)
                         action = agent.select_action(state)
                         
-                        # β統計収集（最初のエージェントのみ）
-                        if collect_beta_stats and seed_idx == 0 and agent_idx == 0:
+                        # β統計収集（全エージェント）
+                        if collect_beta_stats:
                             selected_beta = BETA_VALUES[agent.current_beta_idx]
-                            beta_stats.beta_history.append(selected_beta)
-                            beta_stats.state_history.append(state)
-                            beta_stats.phase_history.append(phase_idx)
-                            beta_stats.step_history.append(global_step)
+                            agent_beta_history.append(selected_beta)
+                            agent_state_history.append(state)
+                            agent_phase_history.append(phase_idx)
+                            # step_historyは最初のエージェントのみ記録（全エージェント共通）
+                            if seed_idx == 0 and agent_idx == 0:
+                                beta_stats.step_history.append(global_step)
                         
                         # Debug出力用にβ値とQ値を取得
                         current_q_mf = None
@@ -629,7 +638,7 @@ def simulate(
                             current_q_mf = agent.q_mf[state].copy()
                             current_q_mb = agent.q_mb[state].copy()
                             current_beta_value = BETA_VALUES[agent.current_beta_idx]
-                            current_q_beta_values = agent.q_beta[state].copy()
+                            current_q_beta_values = agent.q_beta.copy()
                             current_q_mix = current_beta_value * current_q_mb + (1.0 - current_beta_value) * current_q_mf
                         
                         # 行動、学習
@@ -709,9 +718,18 @@ def simulate(
                         global_step += 1
                 
                 # 依存判定
-                if counts.drug_choices > counts.healthy_choices:
+                is_addicted = counts.drug_choices > counts.healthy_choices
+                if is_addicted:
                     addictions += 1
                     run_addictions[seed_idx] += 1
+                
+                # β統計を集約（依存状態も含める）
+                if collect_beta_stats:
+                    beta_stats.beta_history_all.append(agent_beta_history)
+                    beta_stats.state_history_all.append(agent_state_history)
+                    beta_stats.phase_history_all.append(agent_phase_history)
+                    beta_stats.addiction_status.append(is_addicted)
+                    beta_stats.num_agents += 1
 
                 if debug_episode and seed_idx == 0 and agent_idx == 0 and log_file:
                     log_file.write(f"Final Counts - Drug Choices: {counts.drug_choices}, Healthy Choices: {counts.healthy_choices}\n")
@@ -750,47 +768,57 @@ def simulate(
 
 
 def plot_beta_analysis(beta_stats: BetaStatistics, output_prefix: str = "beta_analysis"):
-    """β選択の分析グラフを複数作成"""
+    """β選択の分析グラフを複数作成（全エージェントの平均±標準偏差）"""
     import matplotlib.pyplot as plt
     from matplotlib.gridspec import GridSpec
     
-    beta_array = np.array(beta_stats.beta_history)
-    state_array = np.array(beta_stats.state_history)
-    phase_array = np.array(beta_stats.phase_history)
+    # 全エージェントのデータを2次元配列に変換
+    # beta_history_all: List[List[float]] -> (num_agents, num_steps)
+    beta_matrix = np.array(beta_stats.beta_history_all)  # shape: (num_agents, num_steps)
+    state_matrix = np.array(beta_stats.state_history_all)
+    phase_matrix = np.array(beta_stats.phase_history_all)
     step_array = np.array(beta_stats.step_history)
     
-    # ===== Figure 1: β選択の時系列変化 =====
+    # 各ステップでの平均と標準偏差を計算
+    beta_mean = np.mean(beta_matrix, axis=0)  # shape: (num_steps,)
+    beta_std = np.std(beta_matrix, axis=0)
+    state_mean = np.mean(state_matrix, axis=0)
+    phase_mean = phase_matrix[0]  # フェーズは全エージェント共通
+    
+    # ===== Figure 1: β選択の時系列変化（平均±標準偏差） =====
     fig1 = plt.figure(figsize=(14, 8))
     gs1 = GridSpec(2, 1, height_ratios=[3, 1], hspace=0.3)
     
-    # 上段: β値の時系列（フェーズで色分け）
+    # 上段: β値の時系列（平均±標準偏差）
     ax1_top = fig1.add_subplot(gs1[0])
-    colors = ['#3498db' if p == 0 else '#e74c3c' for p in phase_array]
-    ax1_top.scatter(step_array, beta_array, c=colors, alpha=0.5, s=10, label='Selected β')
+    colors = ['#3498db' if p == 0 else '#e74c3c' for p in phase_mean]
     
-    # 移動平均を追加
-    window = 50
-    if len(beta_array) >= window:
-        beta_smooth = np.convolve(beta_array, np.ones(window)/window, mode='valid')
-        ax1_top.plot(step_array[window-1:], beta_smooth, 'k-', linewidth=2, label=f'Moving Avg (window={window})')
+    # 平均値をプロット
+    ax1_top.plot(step_array, beta_mean, 'k-', linewidth=2, label=f'Mean β (n={beta_stats.num_agents} agents)')
+    
+    # 標準偏差をシェーディング
+    ax1_top.fill_between(step_array, beta_mean - beta_std, beta_mean + beta_std, 
+                          alpha=0.3, color='gray', label='±1 SD')
     
     # フェーズ境界を描画
-    phase_boundary = np.where(np.diff(phase_array) != 0)[0]
+    phase_boundary = np.where(np.diff(phase_mean) != 0)[0]
     for boundary in phase_boundary:
-        ax1_top.axvline(step_array[boundary], color='gray', linestyle='--', alpha=0.5)
+        ax1_top.axvline(step_array[boundary], color='gray', linestyle='--', alpha=0.5, linewidth=1.5)
+        ax1_top.text(step_array[boundary], 1.02, 'Phase Change', ha='center', fontsize=9)
     
     ax1_top.set_ylabel('Selected β Value', fontsize=12)
-    ax1_top.set_ylim(-0.05, 1.05)
-    ax1_top.set_title('β Selection Over Time (Blue: Pre-drug, Red: Addiction)', fontsize=14, fontweight='bold')
+    ax1_top.set_ylim(-0.05, 1.1)
+    ax1_top.set_title(f'β Selection Over Time - Mean±SD across {beta_stats.num_agents} agents', 
+                      fontsize=14, fontweight='bold')
     ax1_top.legend(loc='upper right')
     ax1_top.grid(True, alpha=0.3)
     
-    # 下段: 状態の時系列
+    # 下段: 状態の時系列（平均）
     ax1_bottom = fig1.add_subplot(gs1[1], sharex=ax1_top)
-    ax1_bottom.scatter(step_array, state_array, c=colors, alpha=0.5, s=10)
+    ax1_bottom.plot(step_array, state_mean, 'b-', linewidth=1, alpha=0.7)
     ax1_bottom.set_xlabel('Step', fontsize=12)
-    ax1_bottom.set_ylabel('State', fontsize=12)
-    ax1_bottom.set_title('State Trajectory', fontsize=12)
+    ax1_bottom.set_ylabel('Mean State', fontsize=12)
+    ax1_bottom.set_title('Average State Trajectory', fontsize=12)
     ax1_bottom.grid(True, alpha=0.3)
     
     plt.tight_layout()
@@ -798,16 +826,21 @@ def plot_beta_analysis(beta_stats: BetaStatistics, output_prefix: str = "beta_an
     print(f"Saved: {output_prefix}_timeseries.png")
     plt.close()
     
-    # ===== Figure 2: フェーズ別β選択分布 =====
+    # ===== Figure 2: フェーズ別β選択分布（全エージェント集計） =====
     fig2, axes2 = plt.subplots(1, 2, figsize=(14, 6))
     
     phase_names = ['Pre-drug', 'Addiction']
     for phase_idx, (ax, phase_name) in enumerate(zip(axes2, phase_names)):
-        mask = phase_array == phase_idx
-        if np.sum(mask) == 0:
+        # 全エージェントのデータを統合
+        all_phase_betas = []
+        for agent_phases, agent_betas in zip(phase_matrix, beta_matrix):
+            mask = agent_phases == phase_idx
+            all_phase_betas.extend(agent_betas[mask])
+        
+        if len(all_phase_betas) == 0:
             continue
         
-        phase_betas = beta_array[mask]
+        phase_betas = np.array(all_phase_betas)
         
         # ヒストグラム
         counts, bins, patches = ax.hist(phase_betas, bins=BETA_VALUES.tolist() + [1.1], 
@@ -823,7 +856,7 @@ def plot_beta_analysis(beta_stats: BetaStatistics, output_prefix: str = "beta_an
         
         ax.set_xlabel('β Value', fontsize=12)
         ax.set_ylabel('Frequency', fontsize=12)
-        ax.set_title(f'{phase_name} Phase (n={len(phase_betas)} steps)', 
+        ax.set_title(f'{phase_name} Phase (n={len(phase_betas)} steps, {beta_stats.num_agents} agents)', 
                     fontsize=13, fontweight='bold')
         ax.set_xticks(BETA_VALUES)
         ax.grid(True, alpha=0.3, axis='y')
@@ -833,14 +866,15 @@ def plot_beta_analysis(beta_stats: BetaStatistics, output_prefix: str = "beta_an
     print(f"Saved: {output_prefix}_phase_distribution.png")
     plt.close()
     
-    # ===== Figure 3: 状態別β選択ヒートマップ =====
+    # ===== Figure 3: 状態別β選択ヒートマップ（全エージェント統合） =====
     fig3, ax3 = plt.subplots(figsize=(16, 8))
     
-    # 各状態でのβ選択頻度をカウント
+    # 各状態でのβ選択頻度をカウント（全エージェント）
     state_beta_matrix = np.zeros((NUM_STATES, len(BETA_VALUES)))
-    for state, beta in zip(state_array, beta_array):
-        beta_idx = np.argmin(np.abs(BETA_VALUES - beta))
-        state_beta_matrix[state, beta_idx] += 1
+    for agent_states, agent_betas in zip(state_matrix, beta_matrix):
+        for state, beta in zip(agent_states, agent_betas):
+            beta_idx = np.argmin(np.abs(BETA_VALUES - beta))
+            state_beta_matrix[int(state), beta_idx] += 1
     
     # 各状態で正規化（割合に変換）
     row_sums = state_beta_matrix.sum(axis=1, keepdims=True)
@@ -858,7 +892,8 @@ def plot_beta_analysis(beta_stats: BetaStatistics, output_prefix: str = "beta_an
     # 軸ラベル
     ax3.set_xlabel('State', fontsize=12)
     ax3.set_ylabel('β Value', fontsize=12)
-    ax3.set_title('β Selection Heatmap by State', fontsize=14, fontweight='bold')
+    ax3.set_title(f'β Selection Heatmap by State ({beta_stats.num_agents} agents)', 
+                  fontsize=14, fontweight='bold')
     ax3.set_xticks(range(NUM_STATES))
     ax3.set_yticks(range(len(BETA_VALUES)))
     ax3.set_yticklabels([f'{b:.1f}' for b in BETA_VALUES])
@@ -873,24 +908,30 @@ def plot_beta_analysis(beta_stats: BetaStatistics, output_prefix: str = "beta_an
     print(f"Saved: {output_prefix}_state_heatmap.png")
     plt.close()
     
-    # ===== Figure 4: β選択の全体統計サマリー =====
+    # ===== Figure 4: β選択の全体統計サマリー（全エージェント） =====
     fig4, axes4 = plt.subplots(2, 2, figsize=(14, 10))
+    
+    # 全エージェントのデータを統合
+    beta_all = beta_matrix.flatten()
+    state_all = state_matrix.flatten()
+    phase_all = phase_matrix.flatten()
     
     # (1) 全体のβ分布（円グラフ）
     ax4_1 = axes4[0, 0]
-    beta_counts = [np.sum(np.isclose(beta_array, b)) for b in BETA_VALUES]
+    beta_counts = [np.sum(np.isclose(beta_all, b)) for b in BETA_VALUES]
     colors_pie = plt.cm.viridis(np.linspace(0, 1, len(BETA_VALUES)))
     wedges, texts, autotexts = ax4_1.pie(beta_counts, labels=[f'β={b:.1f}' for b in BETA_VALUES],
                                           autopct='%1.1f%%', colors=colors_pie, startangle=90)
     for autotext in autotexts:
         autotext.set_color('white')
         autotext.set_fontweight('bold')
-    ax4_1.set_title('Overall β Distribution', fontsize=13, fontweight='bold')
+    ax4_1.set_title(f'Overall β Distribution\n({beta_stats.num_agents} agents)', 
+                    fontsize=13, fontweight='bold')
     
     # (2) フェーズごとの平均β
     ax4_2 = axes4[0, 1]
-    phase_means = [np.mean(beta_array[phase_array == i]) for i in range(len(PHASES))]
-    phase_stds = [np.std(beta_array[phase_array == i]) for i in range(len(PHASES))]
+    phase_means = [np.mean(beta_all[phase_all == i]) for i in range(len(PHASES))]
+    phase_stds = [np.std(beta_all[phase_all == i]) for i in range(len(PHASES))]
     bars = ax4_2.bar(phase_names, phase_means, yerr=phase_stds, 
                      color=['#3498db', '#e74c3c'], alpha=0.7, capsize=10)
     ax4_2.set_ylabel('Mean β Value', fontsize=12)
@@ -915,10 +956,10 @@ def plot_beta_analysis(beta_stats: BetaStatistics, output_prefix: str = "beta_an
     type_stds = []
     type_labels = []
     for label, states in state_types.items():
-        mask = np.isin(state_array, states)
+        mask = np.isin(state_all, states)
         if np.sum(mask) > 0:
-            type_means.append(np.mean(beta_array[mask]))
-            type_stds.append(np.std(beta_array[mask]))
+            type_means.append(np.mean(beta_all[mask]))
+            type_stds.append(np.std(beta_all[mask]))
             type_labels.append(label)
     
     bars3 = ax4_3.barh(type_labels, type_means, xerr=type_stds, 
@@ -929,24 +970,28 @@ def plot_beta_analysis(beta_stats: BetaStatistics, output_prefix: str = "beta_an
     ax4_3.set_title('Average β by State Type', fontsize=13, fontweight='bold')
     ax4_3.grid(True, alpha=0.3, axis='x')
     
-    # (4) β値の推移（学習曲線）
+    # (4) β値の推移（学習曲線、平均±標準偏差）
     ax4_4 = axes4[1, 1]
     n_bins = 20
     steps_per_bin = len(step_array) // n_bins
     if steps_per_bin > 0:
         bin_means = []
+        bin_stds = []
         bin_steps = []
         for i in range(n_bins):
             start_idx = i * steps_per_bin
             end_idx = (i + 1) * steps_per_bin if i < n_bins - 1 else len(step_array)
-            bin_means.append(np.mean(beta_array[start_idx:end_idx]))
+            bin_means.append(np.mean(beta_mean[start_idx:end_idx]))
+            bin_stds.append(np.mean(beta_std[start_idx:end_idx]))
             bin_steps.append(np.mean(step_array[start_idx:end_idx]))
         
-        ax4_4.plot(bin_steps, bin_means, 'o-', linewidth=2, markersize=8, color='#e67e22')
+        ax4_4.errorbar(bin_steps, bin_means, yerr=bin_stds, 
+                      fmt='o-', linewidth=2, markersize=8, color='#e67e22',
+                      capsize=5, capthick=2)
         ax4_4.set_xlabel('Step', fontsize=12)
         ax4_4.set_ylabel('Mean β Value', fontsize=12)
         ax4_4.set_ylim(0, 1)
-        ax4_4.set_title('β Learning Curve (binned average)', fontsize=13, fontweight='bold')
+        ax4_4.set_title('β Learning Curve (binned average±SD)', fontsize=13, fontweight='bold')
         ax4_4.grid(True, alpha=0.3)
     
     plt.tight_layout()
@@ -954,19 +999,199 @@ def plot_beta_analysis(beta_stats: BetaStatistics, output_prefix: str = "beta_an
     print(f"Saved: {output_prefix}_summary.png")
     plt.close()
     
+    # ===== Figure 5: 依存群 vs 非依存群の比較 =====
+    addiction_array = np.array(beta_stats.addiction_status)
+    n_addicted = np.sum(addiction_array)
+    n_non_addicted = len(addiction_array) - n_addicted
+    
+    if n_addicted > 0 and n_non_addicted > 0:
+        fig5, axes5 = plt.subplots(2, 2, figsize=(14, 10))
+        
+        # 依存群と非依存群のデータを分離
+        beta_addicted = []
+        beta_non_addicted = []
+        for i, is_addicted in enumerate(addiction_array):
+            if is_addicted:
+                beta_addicted.extend(beta_matrix[i])
+            else:
+                beta_non_addicted.extend(beta_matrix[i])
+        
+        beta_addicted = np.array(beta_addicted)
+        beta_non_addicted = np.array(beta_non_addicted)
+        
+        # (1) β選択頻度の比較（棒グラフ）
+        ax5_1 = axes5[0, 0]
+        x_pos = np.arange(len(BETA_VALUES))
+        width = 0.35
+        
+        counts_addicted = [np.sum(np.isclose(beta_addicted, b)) for b in BETA_VALUES]
+        counts_non_addicted = [np.sum(np.isclose(beta_non_addicted, b)) for b in BETA_VALUES]
+        
+        freq_addicted = [c / len(beta_addicted) * 100 for c in counts_addicted]
+        freq_non_addicted = [c / len(beta_non_addicted) * 100 for c in counts_non_addicted]
+        
+        bars1 = ax5_1.bar(x_pos - width/2, freq_addicted, width, 
+                         label=f'Addicted (n={n_addicted})', color='#e74c3c', alpha=0.7)
+        bars2 = ax5_1.bar(x_pos + width/2, freq_non_addicted, width,
+                         label=f'Non-addicted (n={n_non_addicted})', color='#2ecc71', alpha=0.7)
+        
+        ax5_1.set_xlabel('β Value', fontsize=12)
+        ax5_1.set_ylabel('Selection Frequency (%)', fontsize=12)
+        ax5_1.set_title('β Selection Frequency: Addicted vs Non-addicted', 
+                       fontsize=13, fontweight='bold')
+        ax5_1.set_xticks(x_pos)
+        ax5_1.set_xticklabels([f'{b:.1f}' for b in BETA_VALUES])
+        ax5_1.legend()
+        ax5_1.grid(True, alpha=0.3, axis='y')
+        
+        # (2) 分布の比較（ヒストグラム重ね合わせ）
+        ax5_2 = axes5[0, 1]
+        ax5_2.hist(beta_addicted, bins=20, alpha=0.6, label=f'Addicted (n={n_addicted})',
+                  color='#e74c3c', density=True)
+        ax5_2.hist(beta_non_addicted, bins=20, alpha=0.6, label=f'Non-addicted (n={n_non_addicted})',
+                  color='#2ecc71', density=True)
+        ax5_2.set_xlabel('β Value', fontsize=12)
+        ax5_2.set_ylabel('Density', fontsize=12)
+        ax5_2.set_title('β Distribution Comparison', fontsize=13, fontweight='bold')
+        ax5_2.legend()
+        ax5_2.grid(True, alpha=0.3)
+        
+        # (3) 統計量の比較（箱ひげ図）
+        ax5_3 = axes5[1, 0]
+        bp = ax5_3.boxplot([beta_addicted, beta_non_addicted],
+                           labels=['Addicted', 'Non-addicted'],
+                           patch_artist=True,
+                           widths=0.6)
+        bp['boxes'][0].set_facecolor('#e74c3c')
+        bp['boxes'][0].set_alpha(0.7)
+        bp['boxes'][1].set_facecolor('#2ecc71')
+        bp['boxes'][1].set_alpha(0.7)
+        
+        ax5_3.set_ylabel('β Value', fontsize=12)
+        ax5_3.set_title('β Value Distribution (Boxplot)', fontsize=13, fontweight='bold')
+        ax5_3.grid(True, alpha=0.3, axis='y')
+        
+        # 平均値を表示
+        mean_add = np.mean(beta_addicted)
+        mean_non = np.mean(beta_non_addicted)
+        ax5_3.plot([1, 2], [mean_add, mean_non], 'D', markersize=10, 
+                  color='orange', label='Mean', zorder=3)
+        ax5_3.legend()
+        
+        # (4) フェーズ別平均の比較
+        ax5_4 = axes5[1, 1]
+        
+        # 依存群のフェーズ別平均
+        phase_addicted = []
+        for i, is_addicted in enumerate(addiction_array):
+            if is_addicted:
+                phase_addicted.append(phase_matrix[i])
+        phase_addicted = np.array(phase_addicted)
+        
+        beta_addicted_by_phase = []
+        for i, is_addicted in enumerate(addiction_array):
+            if is_addicted:
+                beta_addicted_by_phase.append(beta_matrix[i])
+        beta_addicted_by_phase = np.array(beta_addicted_by_phase)
+        
+        # 非依存群のフェーズ別平均
+        phase_non_addicted = []
+        beta_non_addicted_by_phase = []
+        for i, is_addicted in enumerate(addiction_array):
+            if not is_addicted:
+                phase_non_addicted.append(phase_matrix[i])
+                beta_non_addicted_by_phase.append(beta_matrix[i])
+        phase_non_addicted = np.array(phase_non_addicted)
+        beta_non_addicted_by_phase = np.array(beta_non_addicted_by_phase)
+        
+        phase_names = ['Pre-drug', 'Addiction']
+        x_pos_phase = np.arange(len(phase_names))
+        width_phase = 0.35
+        
+        means_add = []
+        stds_add = []
+        means_non = []
+        stds_non = []
+        
+        for phase_idx in range(len(PHASES)):
+            # 依存群
+            mask_add = phase_addicted == phase_idx
+            if np.sum(mask_add) > 0:
+                phase_data = beta_addicted_by_phase[mask_add].flatten()
+                means_add.append(np.mean(phase_data))
+                stds_add.append(np.std(phase_data))
+            else:
+                means_add.append(0)
+                stds_add.append(0)
+            
+            # 非依存群
+            mask_non = phase_non_addicted == phase_idx
+            if np.sum(mask_non) > 0:
+                phase_data = beta_non_addicted_by_phase[mask_non].flatten()
+                means_non.append(np.mean(phase_data))
+                stds_non.append(np.std(phase_data))
+            else:
+                means_non.append(0)
+                stds_non.append(0)
+        
+        bars3 = ax5_4.bar(x_pos_phase - width_phase/2, means_add, width_phase,
+                         yerr=stds_add, label='Addicted', 
+                         color='#e74c3c', alpha=0.7, capsize=5)
+        bars4 = ax5_4.bar(x_pos_phase + width_phase/2, means_non, width_phase,
+                         yerr=stds_non, label='Non-addicted',
+                         color='#2ecc71', alpha=0.7, capsize=5)
+        
+        ax5_4.set_xlabel('Phase', fontsize=12)
+        ax5_4.set_ylabel('Mean β Value', fontsize=12)
+        ax5_4.set_title('Average β by Phase: Addicted vs Non-addicted', 
+                       fontsize=13, fontweight='bold')
+        ax5_4.set_xticks(x_pos_phase)
+        ax5_4.set_xticklabels(phase_names)
+        ax5_4.set_ylim(0, 1)
+        ax5_4.legend()
+        ax5_4.grid(True, alpha=0.3, axis='y')
+        
+        plt.tight_layout()
+        plt.savefig(f"{output_prefix}_addiction_comparison.png", dpi=150, bbox_inches='tight')
+        print(f"Saved: {output_prefix}_addiction_comparison.png")
+        plt.close()
+    
     print("\n" + "="*60)
     print("β SELECTION STATISTICS")
     print("="*60)
-    print(f"Total steps analyzed: {len(beta_array)}")
+    print(f"Total steps analyzed: {len(beta_all)} ({beta_stats.num_agents} agents)")
+    print(f"  Addicted: {n_addicted} agents")
+    print(f"  Non-addicted: {n_non_addicted} agents")
+    
     print(f"\nOverall β statistics:")
-    print(f"  Mean: {np.mean(beta_array):.3f} ± {np.std(beta_array):.3f}")
-    print(f"  Median: {np.median(beta_array):.3f}")
-    print(f"  Min: {np.min(beta_array):.3f}, Max: {np.max(beta_array):.3f}")
-    print(f"\nβ selection frequency:")
-    for beta_val in BETA_VALUES:
-        count = np.sum(np.isclose(beta_array, beta_val))
-        percentage = 100.0 * count / len(beta_array)
-        print(f"  β={beta_val:.1f}: {count:6d} times ({percentage:5.2f}%)")
+    print(f"  Mean: {np.mean(beta_all):.3f} ± {np.std(beta_all):.3f}")
+    print(f"  Median: {np.median(beta_all):.3f}")
+    print(f"  Min: {np.min(beta_all):.3f}, Max: {np.max(beta_all):.3f}")
+    
+    if n_addicted > 0 and n_non_addicted > 0:
+        print(f"\n--- Addicted agents (n={n_addicted}) ---")
+        print(f"  Mean β: {np.mean(beta_addicted):.3f} ± {np.std(beta_addicted):.3f}")
+        print(f"  Median β: {np.median(beta_addicted):.3f}")
+        print(f"\nβ selection frequency (Addicted):")
+        for beta_val in BETA_VALUES:
+            count = np.sum(np.isclose(beta_addicted, beta_val))
+            percentage = 100.0 * count / len(beta_addicted)
+            print(f"  β={beta_val:.1f}: {count:6d} times ({percentage:5.2f}%)")
+        
+        print(f"\n--- Non-addicted agents (n={n_non_addicted}) ---")
+        print(f"  Mean β: {np.mean(beta_non_addicted):.3f} ± {np.std(beta_non_addicted):.3f}")
+        print(f"  Median β: {np.median(beta_non_addicted):.3f}")
+        print(f"\nβ selection frequency (Non-addicted):")
+        for beta_val in BETA_VALUES:
+            count = np.sum(np.isclose(beta_non_addicted, beta_val))
+            percentage = 100.0 * count / len(beta_non_addicted)
+            print(f"  β={beta_val:.1f}: {count:6d} times ({percentage:5.2f}%)")
+    else:
+        print(f"\nβ selection frequency:")
+        for beta_val in BETA_VALUES:
+            count = np.sum(np.isclose(beta_all, beta_val))
+            percentage = 100.0 * count / len(beta_all)
+            print(f"  β={beta_val:.1f}: {count:6d} times ({percentage:5.2f}%)")
 
 
 def main():

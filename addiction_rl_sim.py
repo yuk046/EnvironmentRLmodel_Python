@@ -578,7 +578,13 @@ def simulate(
 
     try:
         for seed_idx in range(num_runs):
+            print(f"\n[Run {seed_idx + 1}/{num_runs}] Starting...")
             for agent_idx in range(num_agents):
+                # 100体ごとに進捗表示
+                if agent_idx > 0 and agent_idx % 100 == 0:
+                    current_addiction_rate = run_addictions[seed_idx] / agent_idx * 100
+                    print(f"  [Run {seed_idx + 1}/{num_runs}] Processed {agent_idx}/{num_agents} agents | Current addiction rate: {current_addiction_rate:.2f}%")
+                
                 # 固定ペアリングシード: (run, agent) ごとに一意のシードを割り当て
                 # これにより同じ (run, agent) 番号は全ての beta 値で同じ初期 RNG を使います
                 seed_for_agent = base_seed + seed_idx * num_agents + agent_idx
@@ -733,6 +739,10 @@ def simulate(
 
                 if debug_episode and seed_idx == 0 and agent_idx == 0 and log_file:
                     log_file.write(f"Final Counts - Drug Choices: {counts.drug_choices}, Healthy Choices: {counts.healthy_choices}\n")
+            
+            # Run終了時の統計表示
+            run_addiction_rate = run_addictions[seed_idx] / num_agents * 100
+            print(f"  [Run {seed_idx + 1}/{num_runs}] Completed! Final addiction rate: {run_addiction_rate:.2f}% ({run_addictions[seed_idx]}/{num_agents} agents)")
     finally:
         if log_file:
             log_file.close()
@@ -1155,6 +1165,190 @@ def plot_beta_analysis(beta_stats: BetaStatistics, output_prefix: str = "beta_an
         plt.savefig(f"{output_prefix}_addiction_comparison.png", dpi=150, bbox_inches='tight')
         print(f"Saved: {output_prefix}_addiction_comparison.png")
         plt.close()
+        
+        # ===== Figure 6: 追加の詳細分析グラフ =====
+        fig6, axes6 = plt.subplots(2, 3, figsize=(18, 10))
+        
+        # (1) β変動性の比較（各エージェントの標準偏差）
+        ax6_1 = axes6[0, 0]
+        std_addicted = [np.std(beta_matrix[i]) for i, is_add in enumerate(addiction_array) if is_add]
+        std_non_addicted = [np.std(beta_matrix[i]) for i, is_add in enumerate(addiction_array) if not is_add]
+        
+        bp1 = ax6_1.boxplot([std_addicted, std_non_addicted],
+                            tick_labels=['Addicted', 'Non-addicted'],
+                            patch_artist=True, widths=0.6)
+        bp1['boxes'][0].set_facecolor('#e74c3c')
+        bp1['boxes'][0].set_alpha(0.7)
+        bp1['boxes'][1].set_facecolor('#2ecc71')
+        bp1['boxes'][1].set_alpha(0.7)
+        
+        ax6_1.set_ylabel('β Standard Deviation (per agent)', fontsize=11)
+        ax6_1.set_title('β Variability Comparison', fontsize=12, fontweight='bold')
+        ax6_1.grid(True, alpha=0.3, axis='y')
+        
+        # 平均値を表示
+        ax6_1.plot([1, 2], [np.mean(std_addicted), np.mean(std_non_addicted)], 
+                  'D', markersize=10, color='orange', label='Mean', zorder=3)
+        ax6_1.legend()
+        
+        # (2) 極端値使用率の比較
+        ax6_2 = axes6[0, 1]
+        extreme_rates_add = []
+        extreme_rates_non = []
+        for i, is_add in enumerate(addiction_array):
+            agent_betas = beta_matrix[i]
+            extreme_rate = (np.sum(np.isclose(agent_betas, 0.0)) + 
+                          np.sum(np.isclose(agent_betas, 1.0))) / len(agent_betas) * 100
+            if is_add:
+                extreme_rates_add.append(extreme_rate)
+            else:
+                extreme_rates_non.append(extreme_rate)
+        
+        ax6_2.hist(extreme_rates_add, bins=20, alpha=0.6, label='Addicted',
+                  color='#e74c3c', density=True)
+        ax6_2.hist(extreme_rates_non, bins=20, alpha=0.6, label='Non-addicted',
+                  color='#2ecc71', density=True)
+        ax6_2.set_xlabel('Extreme Value Usage (%)', fontsize=11)
+        ax6_2.set_ylabel('Density', fontsize=11)
+        ax6_2.set_title('Extreme Strategy Usage Distribution', fontsize=12, fontweight='bold')
+        ax6_2.legend()
+        ax6_2.grid(True, alpha=0.3)
+        ax6_2.axvline(np.mean(extreme_rates_add), color='#e74c3c', linestyle='--', linewidth=2)
+        ax6_2.axvline(np.mean(extreme_rates_non), color='#2ecc71', linestyle='--', linewidth=2)
+        
+        # (3) 各βの使用率差（棒グラフ）
+        ax6_3 = axes6[0, 2]
+        freq_diff = []
+        for beta_val in BETA_VALUES:
+            freq_add = np.sum(np.isclose(beta_addicted, beta_val)) / len(beta_addicted) * 100
+            freq_non = np.sum(np.isclose(beta_non_addicted, beta_val)) / len(beta_non_addicted) * 100
+            freq_diff.append(freq_add - freq_non)
+        
+        colors_diff = ['#e74c3c' if d > 0 else '#2ecc71' for d in freq_diff]
+        bars_diff = ax6_3.bar(range(len(BETA_VALUES)), freq_diff, color=colors_diff, alpha=0.7)
+        ax6_3.axhline(0, color='black', linewidth=1)
+        ax6_3.set_xlabel('β Value', fontsize=11)
+        ax6_3.set_ylabel('Usage Difference (%)', fontsize=11)
+        ax6_3.set_title('β Usage: Addicted - Non-addicted', fontsize=12, fontweight='bold')
+        ax6_3.set_xticks(range(len(BETA_VALUES)))
+        ax6_3.set_xticklabels([f'{b:.1f}' for b in BETA_VALUES])
+        ax6_3.grid(True, alpha=0.3, axis='y')
+        
+        # 値をバーに表示
+        for i, (bar, diff) in enumerate(zip(bars_diff, freq_diff)):
+            height = bar.get_height()
+            ax6_3.text(bar.get_x() + bar.get_width()/2, height,
+                      f'{diff:+.1f}%', ha='center', 
+                      va='bottom' if height > 0 else 'top', fontsize=9)
+        
+        # (4) 時系列でのβ平均（依存群vs非依存群）
+        ax6_4 = axes6[1, 0]
+        
+        # 各時刻での平均を計算
+        beta_add_mean_t = np.mean(beta_addicted_by_phase, axis=0)
+        beta_non_mean_t = np.mean(beta_non_addicted_by_phase, axis=0)
+        beta_add_std_t = np.std(beta_addicted_by_phase, axis=0)
+        beta_non_std_t = np.std(beta_non_addicted_by_phase, axis=0)
+        
+        ax6_4.plot(step_array, beta_add_mean_t, '-', color='#e74c3c', linewidth=2, 
+                  label='Addicted', alpha=0.8)
+        ax6_4.fill_between(step_array, beta_add_mean_t - beta_add_std_t, 
+                          beta_add_mean_t + beta_add_std_t,
+                          color='#e74c3c', alpha=0.2)
+        
+        ax6_4.plot(step_array, beta_non_mean_t, '-', color='#2ecc71', linewidth=2,
+                  label='Non-addicted', alpha=0.8)
+        ax6_4.fill_between(step_array, beta_non_mean_t - beta_non_std_t,
+                          beta_non_mean_t + beta_non_std_t,
+                          color='#2ecc71', alpha=0.2)
+        
+        # フェーズ境界
+        phase_boundary = np.where(np.diff(phase_mean) != 0)[0]
+        for boundary in phase_boundary:
+            ax6_4.axvline(step_array[boundary], color='gray', linestyle='--', alpha=0.5)
+        
+        ax6_4.set_xlabel('Step', fontsize=11)
+        ax6_4.set_ylabel('Mean β Value', fontsize=11)
+        ax6_4.set_title('β Dynamics: Addicted vs Non-addicted', fontsize=12, fontweight='bold')
+        ax6_4.set_ylim(-0.05, 1.05)
+        ax6_4.legend()
+        ax6_4.grid(True, alpha=0.3)
+        
+        # (5) 中間値使用率の比較
+        ax6_5 = axes6[1, 1]
+        middle_rates_add = []
+        middle_rates_non = []
+        for i, is_add in enumerate(addiction_array):
+            agent_betas = beta_matrix[i]
+            # β=0.2, 0.4, 0.6, 0.8の使用率
+            middle_count = 0
+            for beta_val in [0.2, 0.4, 0.6, 0.8]:
+                middle_count += np.sum(np.isclose(agent_betas, beta_val))
+            middle_rate = middle_count / len(agent_betas) * 100
+            if is_add:
+                middle_rates_add.append(middle_rate)
+            else:
+                middle_rates_non.append(middle_rate)
+        
+        bp2 = ax6_5.boxplot([middle_rates_add, middle_rates_non],
+                            tick_labels=['Addicted', 'Non-addicted'],
+                            patch_artist=True, widths=0.6)
+        bp2['boxes'][0].set_facecolor('#e74c3c')
+        bp2['boxes'][0].set_alpha(0.7)
+        bp2['boxes'][1].set_facecolor('#2ecc71')
+        bp2['boxes'][1].set_alpha(0.7)
+        
+        ax6_5.set_ylabel('Middle Values Usage (%)', fontsize=11)
+        ax6_5.set_title('Balanced Strategy Usage (β=0.2-0.8)', fontsize=12, fontweight='bold')
+        ax6_5.grid(True, alpha=0.3, axis='y')
+        
+        # 平均値を表示
+        ax6_5.plot([1, 2], [np.mean(middle_rates_add), np.mean(middle_rates_non)],
+                  'D', markersize=10, color='orange', label='Mean', zorder=3)
+        ax6_5.legend()
+        
+        # (6) 相関分析：β平均値と依存確率
+        ax6_6 = axes6[1, 2]
+        
+        # 各エージェントの平均β値を計算
+        agent_mean_betas = [np.mean(beta_matrix[i]) for i in range(len(beta_matrix))]
+        
+        # β値を10区間に分割
+        beta_bins = np.linspace(0, 1, 11)
+        addiction_rates_by_beta = []
+        bin_centers = []
+        bin_counts = []
+        
+        for i in range(len(beta_bins) - 1):
+            bin_low = beta_bins[i]
+            bin_high = beta_bins[i + 1]
+            mask = (np.array(agent_mean_betas) >= bin_low) & (np.array(agent_mean_betas) < bin_high)
+            if i == len(beta_bins) - 2:  # 最後のビンは上限を含む
+                mask = (np.array(agent_mean_betas) >= bin_low) & (np.array(agent_mean_betas) <= bin_high)
+            
+            if np.sum(mask) > 0:
+                addiction_rate = np.sum(np.array(beta_stats.addiction_status)[mask]) / np.sum(mask) * 100
+                addiction_rates_by_beta.append(addiction_rate)
+                bin_centers.append((bin_low + bin_high) / 2)
+                bin_counts.append(np.sum(mask))
+        
+        ax6_6.plot(bin_centers, addiction_rates_by_beta, 'o-', linewidth=2, markersize=8,
+                  color='#9b59b6')
+        ax6_6.set_xlabel('Mean β Value (binned)', fontsize=11)
+        ax6_6.set_ylabel('Addiction Rate (%)', fontsize=11)
+        ax6_6.set_title('Addiction Rate by Mean β Value', fontsize=12, fontweight='bold')
+        ax6_6.grid(True, alpha=0.3)
+        ax6_6.set_xlim(0, 1)
+        
+        # サンプル数を注釈
+        for x, y, count in zip(bin_centers, addiction_rates_by_beta, bin_counts):
+            ax6_6.annotate(f'n={count}', (x, y), textcoords='offset points',
+                          xytext=(0, 5), ha='center', fontsize=8, alpha=0.7)
+        
+        plt.tight_layout()
+        plt.savefig(f"{output_prefix}_detailed_analysis.png", dpi=150, bbox_inches='tight')
+        print(f"Saved: {output_prefix}_detailed_analysis.png")
+        plt.close()
     
     print("\n" + "="*60)
     print("β SELECTION STATISTICS")
@@ -1172,6 +1366,9 @@ def plot_beta_analysis(beta_stats: BetaStatistics, output_prefix: str = "beta_an
         print(f"\n--- Addicted agents (n={n_addicted}) ---")
         print(f"  Mean β: {np.mean(beta_addicted):.3f} ± {np.std(beta_addicted):.3f}")
         print(f"  Median β: {np.median(beta_addicted):.3f}")
+        # 極端値の使用率
+        extreme_add = np.sum(np.isclose(beta_addicted, 0.0)) + np.sum(np.isclose(beta_addicted, 1.0))
+        print(f"  Extreme values (β=0.0 or 1.0): {extreme_add / len(beta_addicted) * 100:.2f}%")
         print(f"\nβ selection frequency (Addicted):")
         for beta_val in BETA_VALUES:
             count = np.sum(np.isclose(beta_addicted, beta_val))
@@ -1181,11 +1378,19 @@ def plot_beta_analysis(beta_stats: BetaStatistics, output_prefix: str = "beta_an
         print(f"\n--- Non-addicted agents (n={n_non_addicted}) ---")
         print(f"  Mean β: {np.mean(beta_non_addicted):.3f} ± {np.std(beta_non_addicted):.3f}")
         print(f"  Median β: {np.median(beta_non_addicted):.3f}")
+        # 極端値の使用率
+        extreme_non = np.sum(np.isclose(beta_non_addicted, 0.0)) + np.sum(np.isclose(beta_non_addicted, 1.0))
+        print(f"  Extreme values (β=0.0 or 1.0): {extreme_non / len(beta_non_addicted) * 100:.2f}%")
         print(f"\nβ selection frequency (Non-addicted):")
         for beta_val in BETA_VALUES:
             count = np.sum(np.isclose(beta_non_addicted, beta_val))
             percentage = 100.0 * count / len(beta_non_addicted)
             print(f"  β={beta_val:.1f}: {count:6d} times ({percentage:5.2f}%)")
+        
+        # 差の統計
+        print(f"\n--- Comparison (Addicted vs Non-addicted) ---")
+        print(f"  Mean difference: {np.mean(beta_addicted) - np.mean(beta_non_addicted):.3f}")
+        print(f"  Extreme value difference: {(extreme_add / len(beta_addicted) - extreme_non / len(beta_non_addicted)) * 100:.2f}%")
     else:
         print(f"\nβ selection frequency:")
         for beta_val in BETA_VALUES:

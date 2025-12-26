@@ -1349,6 +1349,85 @@ def plot_beta_analysis(beta_stats: BetaStatistics, output_prefix: str = "beta_an
         plt.savefig(f"{output_prefix}_detailed_analysis.png", dpi=150, bbox_inches='tight')
         print(f"Saved: {output_prefix}_detailed_analysis.png")
         plt.close()
+        
+        # ===== Figure 7: 依存/非依存エージェントのβ選択推移（各β値の使用率の時系列） =====
+        fig7, axes7 = plt.subplots(2, 1, figsize=(16, 10))
+        
+        # 各時刻での各β値の使用頻度を計算
+        # Addicted group
+        beta_freq_add_over_time = np.zeros((len(BETA_VALUES), len(step_array)))
+        for agent_idx, is_addicted in enumerate(addiction_array):
+            if is_addicted:
+                for t_idx, beta_val in enumerate(beta_matrix[agent_idx]):
+                    beta_idx = np.argmin(np.abs(BETA_VALUES - beta_val))
+                    beta_freq_add_over_time[beta_idx, t_idx] += 1
+        
+        # 正規化（各時刻での割合に変換）
+        n_addicted_agents = np.sum(addiction_array)
+        if n_addicted_agents > 0:
+            beta_freq_add_over_time = beta_freq_add_over_time / n_addicted_agents * 100
+        
+        # Non-addicted group
+        beta_freq_non_over_time = np.zeros((len(BETA_VALUES), len(step_array)))
+        for agent_idx, is_addicted in enumerate(addiction_array):
+            if not is_addicted:
+                for t_idx, beta_val in enumerate(beta_matrix[agent_idx]):
+                    beta_idx = np.argmin(np.abs(BETA_VALUES - beta_val))
+                    beta_freq_non_over_time[beta_idx, t_idx] += 1
+        
+        # 正規化
+        n_non_addicted_agents = len(addiction_array) - n_addicted_agents
+        if n_non_addicted_agents > 0:
+            beta_freq_non_over_time = beta_freq_non_over_time / n_non_addicted_agents * 100
+        
+        # Addicted群のプロット
+        ax7_1 = axes7[0]
+        colors_beta = plt.cm.viridis(np.linspace(0, 1, len(BETA_VALUES)))
+        
+        for beta_idx, beta_val in enumerate(BETA_VALUES):
+            ax7_1.plot(step_array, beta_freq_add_over_time[beta_idx], 
+                      label=f'β={beta_val:.1f}', linewidth=2, 
+                      color=colors_beta[beta_idx], alpha=0.8)
+        
+        # フェーズ境界
+        phase_boundary = np.where(np.diff(phase_mean) != 0)[0]
+        for boundary in phase_boundary:
+            ax7_1.axvline(step_array[boundary], color='red', linestyle='--', 
+                         linewidth=2, alpha=0.7, label='Phase Transition' if boundary == phase_boundary[0] else '')
+        
+        ax7_1.set_xlabel('Step', fontsize=12)
+        ax7_1.set_ylabel('Usage Rate (%)', fontsize=12)
+        ax7_1.set_title(f'β Selection Dynamics: Addicted Group (n={n_addicted_agents} agents)', 
+                       fontsize=14, fontweight='bold')
+        ax7_1.legend(loc='upper right', fontsize=10, ncol=2)
+        ax7_1.grid(True, alpha=0.3)
+        ax7_1.set_ylim(0, 35)
+        
+        # Non-addicted群のプロット
+        ax7_2 = axes7[1]
+        
+        for beta_idx, beta_val in enumerate(BETA_VALUES):
+            ax7_2.plot(step_array, beta_freq_non_over_time[beta_idx], 
+                      label=f'β={beta_val:.1f}', linewidth=2,
+                      color=colors_beta[beta_idx], alpha=0.8)
+        
+        # フェーズ境界
+        for boundary in phase_boundary:
+            ax7_2.axvline(step_array[boundary], color='red', linestyle='--',
+                         linewidth=2, alpha=0.7, label='Phase Transition' if boundary == phase_boundary[0] else '')
+        
+        ax7_2.set_xlabel('Step', fontsize=12)
+        ax7_2.set_ylabel('Usage Rate (%)', fontsize=12)
+        ax7_2.set_title(f'β Selection Dynamics: Non-addicted Group (n={n_non_addicted_agents} agents)', 
+                       fontsize=14, fontweight='bold')
+        ax7_2.legend(loc='upper right', fontsize=10, ncol=2)
+        ax7_2.grid(True, alpha=0.3)
+        ax7_2.set_ylim(0, 35)
+        
+        plt.tight_layout()
+        plt.savefig(f"{output_prefix}_beta_transition_comparison.png", dpi=150, bbox_inches='tight')
+        print(f"Saved: {output_prefix}_beta_transition_comparison.png")
+        plt.close()
     
     print("\n" + "="*60)
     print("β SELECTION STATISTICS")
@@ -1402,7 +1481,7 @@ def plot_beta_analysis(beta_stats: BetaStatistics, output_prefix: str = "beta_an
 def main():
     parser = argparse.ArgumentParser(description="Fast Hybrid RL Addiction Simulation with Beta Learning")
     parser.add_argument("--num-agents", type=int, default=900, help="Agents per seed")
-    parser.add_argument("--num-runs", type=int, default=1, help="Number of seeds")
+    parser.add_argument("--num-runs", type=int, default=50, help="Number of seeds")
     parser.add_argument("--seed", type=int, default=42, help="Base random seed")
     parser.add_argument(
         "--output",

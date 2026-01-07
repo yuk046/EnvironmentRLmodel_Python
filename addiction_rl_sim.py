@@ -409,9 +409,10 @@ class AddictionEnvironment:
 
 
 class HybridAgent:
-    def __init__(self, rng: np.random.Generator, mb_forget: bool = False):
+    def __init__(self, rng: np.random.Generator, mb_forget: bool = False, fixed_beta: Optional[float] = None):
         self.rng = rng
         self.mb_forget = mb_forget
+        self.fixed_beta = fixed_beta  # 固定β値(Noneの場合は学習モード)
         
         # Qテーブル (MF, MB)
         self.q_mf = np.zeros((NUM_STATES, NUM_ACTIONS), dtype=np.float64)
@@ -421,6 +422,10 @@ class HybridAgent:
         self.q_beta = np.zeros(len(BETA_VALUES), dtype=np.float64)
         self.current_beta_idx = 0  # 現在選択されているβのインデックス
         self.prev_beta_idx = None  # β選択のQ学習用に前のβインデックスを記憶
+        
+        # 固定β値モードの場合、対応するインデックスを設定
+        if self.fixed_beta is not None:
+            self.current_beta_idx = np.argmin(np.abs(BETA_VALUES - self.fixed_beta))
         
         # メンタルモデル (Numba用にfloat64で定義)
         # [今の状態, 行動, 次の状態] に何回遷移したかを記録する3次元配列
@@ -441,7 +446,11 @@ class HybridAgent:
                 self.model_observed[s, a, s] = True  # 初期状態も観測済みとしてマーク
 
     def select_beta(self) -> int:
-        """β値を選択する（ε-greedy）"""
+        """β値を選択する（ε-greedy or 固定値）"""
+        # 固定β値モードの場合は常に同じインデックスを返す
+        if self.fixed_beta is not None:
+            return self.current_beta_idx
+        
         # ε-Greedy でβを選択
         if self.rng.random() < EPSILON_BETA:
             return int(self.rng.integers(len(BETA_VALUES)))
@@ -475,8 +484,8 @@ class HybridAgent:
 
     # モデルの学習機構
     def observe(self, state: int, action: int, reward: float, next_state: int, phase_idx: int):
-        # --- β学習の更新 ---
-        if self.prev_beta_idx is not None:
+        # --- β学習の更新(固定β値モードではスキップ) ---
+        if self.fixed_beta is None and self.prev_beta_idx is not None:
             # 前のステップで選択したβのQ値を更新
             # TD学習: Q(β) ← Q(β) + α * (R + γ*max_β' Q(β') - Q(β))
             td_target_beta = reward + DISCOUNT * np.max(self.q_beta)
@@ -484,8 +493,9 @@ class HybridAgent:
                 td_target_beta - self.q_beta[self.prev_beta_idx]
             )
         
-        # 次回のβ更新のために現在のβインデックスを記憶
-        self.prev_beta_idx = self.current_beta_idx
+        # 次回のβ更新のために現在のβインデックスを記憶(固定β値モードではスキップ)
+        if self.fixed_beta is None:
+            self.prev_beta_idx = self.current_beta_idx
         
         # --- Model-Free (直感) の更新 ---
         # Q学習の式: Q(s,a) ← Q(s,a) + α * (R + γ*maxQ(s') - Q(s,a))
@@ -551,6 +561,7 @@ def simulate(
     debug_csv_path: Optional[str] = None,
     debug_txt_path: Optional[str] = None,
     collect_beta_stats: bool = False,
+    fixed_beta: Optional[float] = None,
 ) -> Tuple[float, List[float], Optional[BetaStatistics]]:
     
     addictions = 0
@@ -591,7 +602,7 @@ def simulate(
                 rng = np.random.default_rng(seed_for_agent)
 
                 env = AddictionEnvironment(rng)
-                agent = HybridAgent(rng, mb_forget=mb_forget)
+                agent = HybridAgent(rng, mb_forget=mb_forget, fixed_beta=fixed_beta)
                 
                 state = env.reset()
                 counts = PhaseResult()
@@ -1546,10 +1557,20 @@ def main():
         default="beta_analysis",
         help="Prefix for output plot files (default: beta_analysis)",
     )
+    parser.add_argument(
+        "--fixed-beta",
+        type=float,
+        default=None,
+        choices=[0.0, 0.2, 0.4, 0.6, 0.8, 1.0],
+        help="Fix beta to a specific value instead of learning (choices: 0.0, 0.2, 0.4, 0.6, 0.8, 1.0)",
+    )
     args = parser.parse_args()
 
     print(f"Simulation Start: Agents={args.num_agents}, Runs={args.num_runs}, Seed={args.seed}")
-    print(f"Beta Learning Mode: Enabled (learning optimal β for each state)")
+    if args.fixed_beta is not None:
+        print(f"Beta Mode: Fixed (β={args.fixed_beta})")
+    else:
+        print(f"Beta Mode: Learning (adaptive β selection)")
     print("-" * 60)
 
     def log_progress(seed, agent, n_agents, n_runs, p_idx, step, length):
@@ -1573,6 +1594,7 @@ def main():
         debug_csv_path=args.debug_csv,
         debug_txt_path=debug_txt_path,
         collect_beta_stats=args.plot_beta,
+        fixed_beta=args.fixed_beta,
     )
     
     mean_percent = np.mean(run_rates) * 100.0

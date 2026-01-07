@@ -1,0 +1,11 @@
+{
+  "addiction_rate": 41.66666666666667,
+  "run_rates": [
+    41.66666666666667
+  ],
+  "num_agents": 900,
+  "num_runs": 1,
+  "seed": 42,
+  "mb_forget": false,
+  "beta_learning": true
+}

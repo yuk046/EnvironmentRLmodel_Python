@@ -1401,7 +1401,7 @@ def plot_beta_analysis(beta_stats: BetaStatistics, output_prefix: str = "beta_an
                        fontsize=14, fontweight='bold')
         ax7_1.legend(loc='upper right', fontsize=10, ncol=2)
         ax7_1.grid(True, alpha=0.3)
-        ax7_1.set_ylim(0, 35)
+        ax7_1.set_ylim(10, 25)
         
         # Non-addicted群のプロット
         ax7_2 = axes7[1]
@@ -1422,7 +1422,7 @@ def plot_beta_analysis(beta_stats: BetaStatistics, output_prefix: str = "beta_an
                        fontsize=14, fontweight='bold')
         ax7_2.legend(loc='upper right', fontsize=10, ncol=2)
         ax7_2.grid(True, alpha=0.3)
-        ax7_2.set_ylim(0, 35)
+        ax7_2.set_ylim(6, 25)
         
         plt.tight_layout()
         plt.savefig(f"{output_prefix}_beta_transition_comparison.png", dpi=150, bbox_inches='tight')

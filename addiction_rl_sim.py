@@ -96,30 +96,37 @@ ACTION_NAMES = {
     ACTION_AW: "aw",
 }
 
-# 遷移確率テーブル (f1: Pre-drug, f2: Addiction)
-NEUTRAL_MOVE_SUCCESS = [0.99, 0.99] #隣り合う状態遷移
-NEUTRAL_SKIP_SUCCESS = [0.0001, 0.0001] #離れた状態遷移
+# 遷移確率テーブル (f1: Pre-drug, f2: Addiction, f3: Reversal)
+NEUTRAL_MOVE_SUCCESS = [0.99, 0.99, 0.99] #隣り合う状態遷移
+NEUTRAL_SKIP_SUCCESS = [0.0001, 0.0001, 0.0001] #離れた状態遷移
 # アフターエフェクト区間の状態遷移
-AFTER_AG_EXIT = [0.001, 0.001]
-AFTER_AS_EXIT = [0.001, 0.001]
-AW_FORWARD = [0.4995, 0.4995]
-AW_BACKWARD = [0.4995, 0.4995]
+AFTER_AG_EXIT = [0.001, 0.001, 0.001]
+AFTER_AS_EXIT = [0.001, 0.001, 0.001]
+AW_FORWARD = [0.4995, 0.4995, 0.4995]
+AW_BACKWARD = [0.4995, 0.4995, 0.4995]
 # 状態15(14)での特別遷移
-AW_SPECIAL_MOVE = [0.4, 0.4]
-AW_SPECIAL_EXIT = [0.6, 0.6]
-AD_FORWARD = [0.745, 0.745]
-AD_BACKWARD = [0.245, 0.245]
+AW_SPECIAL_MOVE = [0.4, 0.4, 0.4]
+AW_SPECIAL_EXIT = [0.6, 0.6, 0.6]
+AD_FORWARD = [0.745, 0.745, 0.745]
+AD_BACKWARD = [0.245, 0.245, 0.245]
 
-# フェーズ定義: (名前, ステップ数, 薬物報酬)
-PHASES: Tuple[Tuple[str, int, float], ...] = (
-    ("pre-drug", 50, 0.0),
-    ("addiction", 1000, 10.0),
+# フェーズ定義: (名前, ステップ数, 薬物報酬, Goal報酬)
+# reversal フェーズでは報酬が逆転: Drug=1.0(健康的), Goal=10.0(依存的)
+PHASES: Tuple[Tuple[str, int, float, float], ...] = (
+    ("pre-drug", 50, 0.0, 1.0),      # Drug報酬=0, Goal報酬=1
+    ("addiction", 1000, 10.0, 1.0),   # Drug報酬=10, Goal報酬=1
+    ("reversal", 1000, 1.0, 10.0),    # Drug報酬=1, Goal報酬=10 (逆転)
 )
 
 # 報酬テーブルの事前構築
-PHASE_REWARD_TABLE = np.zeros((len(PHASES), NUM_STATES)) #2x22
-PHASE_DRUG_REWARDS = np.array([phase[2] for phase in PHASES], dtype=np.float64) #[0.0, 10.0]
+PHASE_REWARD_TABLE = np.zeros((len(PHASES), NUM_STATES)) #3x22
+PHASE_DRUG_REWARDS = np.array([phase[2] for phase in PHASES], dtype=np.float64) #[0.0, 10.0, 1.0]
+PHASE_GOAL_REWARDS = np.array([phase[3] for phase in PHASES], dtype=np.float64) #[1.0, 1.0, 10.0]
 # アフターエフェクト区間の報酬は_reward関数内で動的に計算するため、ここでは設定しない
+
+# フェーズ3(reversal)用のアフターエフェクト報酬 (Goal版)
+# reversalフェーズではGoal報酬獲得後にGoal版アフターエフェクト区間に入る
+AFTER_PHASE_REWARDS_REVERSAL = -1.2  # reversalフェーズでのGoal版アフターエフェクト罰則
 
 
 # ==========================================
@@ -276,6 +283,20 @@ def run_prioritized_sweeping(
 class PhaseResult:
     drug_choices: int = 0
     healthy_choices: int = 0
+    # reversalフェーズ用: Goalが依存的、Drugが健康的に逆転
+    reversal_goal_choices: int = 0    # reversalでのGoal選択（依存的）
+    reversal_drug_choices: int = 0    # reversalでのDrug選択（健康的）
+    
+    # フェーズ別状態訪問カウント（分析用）
+    # addiction_phase_state_visits[state] = そのフェーズで状態stateを訪問した回数
+    addiction_phase_state_visits: Optional[np.ndarray] = None
+    reversal_phase_state_visits: Optional[np.ndarray] = None
+    
+    def __post_init__(self):
+        if self.addiction_phase_state_visits is None:
+            self.addiction_phase_state_visits = np.zeros(NUM_STATES, dtype=np.int64)
+        if self.reversal_phase_state_visits is None:
+            self.reversal_phase_state_visits = np.zeros(NUM_STATES, dtype=np.int64)
 
 @dataclass
 class BetaStatistics:
@@ -306,8 +327,15 @@ class AddictionEnvironment:
         elif curr == STATE_DRUG or curr in STATE_AFTER_SET:
             next_state = self._transition_aftereffect(curr, action, phase_idx)
         elif curr == STATE_GOAL:
-            # GoalからはStartへ戻るか、Goalに留まるか(行動による)
-            next_state = STATE_START if action == ACTION_GOAL else STATE_GOAL
+            # reversalフェーズではGoal行動でアフターエフェクト区間(STATE_DRUG)へ
+            # 通常フェーズではGoal行動でSTARTへ
+            if action == ACTION_GOAL:
+                if phase_idx == 2:  # reversalフェーズ
+                    next_state = STATE_DRUG  # Goal報酬後にアフターエフェクト区間へ
+                else:
+                    next_state = STATE_START
+            else:
+                next_state = STATE_GOAL
         else:
             # Start地点など
             next_state = curr
@@ -332,7 +360,11 @@ class AddictionEnvironment:
         if action == ACTION_GOAL and state == STATE_GOAL_ENTRY:
             return STATE_GOAL
         if action == ACTION_DRUG and state == NEUTRAL_MAX:
-            return STATE_DRUG
+            # reversalフェーズではDrug行動は健康的（STARTへ直接戻る）
+            if phase_idx == 2:  # reversalフェーズ
+                return STATE_START  # 健康的報酬を得てSTARTに戻る
+            else:
+                return STATE_DRUG  # 通常通りアフターエフェクト区間へ
             
         return state
 
@@ -385,25 +417,41 @@ class AddictionEnvironment:
     def _reward(self, current_state: int, action: int, next_state: int, phase_idx: int) -> float:
         r = PHASE_REWARD_TABLE[phase_idx, next_state]
 
-        # 状態0でagした際
-        if current_state == STATE_GOAL and action == ACTION_GOAL and next_state == STATE_START:
-            r += R_G
-        # 状態6でadした際（薬物報酬）
-        elif (current_state == NEUTRAL_MAX and action == ACTION_DRUG and next_state == STATE_DRUG):
-            r += PHASE_DRUG_REWARDS[phase_idx]
+        # === reversalフェーズ（phase_idx=2）の報酬ロジック ===
+        if phase_idx == 2:
+            # reversal: Goal報酬=10(依存的), Drug報酬=1(健康的)
+            # Goal状態(0)でGoal行動→Drug状態(7)へ（Goal報酬獲得後アフターエフェクト）
+            if current_state == STATE_GOAL and action == ACTION_GOAL and next_state == STATE_DRUG:
+                r += PHASE_GOAL_REWARDS[phase_idx]  # Goal報酬=10.0
+            # Neutral最終(6)でDrug行動→START(3)へ（健康的報酬）
+            elif current_state == NEUTRAL_MAX and action == ACTION_DRUG and next_state == STATE_START:
+                r += PHASE_DRUG_REWARDS[phase_idx]  # Drug報酬=1.0（健康的）
+            # アフターエフェクト区間での罰則（Goal版アフターエフェクト）
+            if current_state in STATE_DRUG_AFTEREFFECT_SET:
+                if next_state == STATE_START:  # 状態4への遷移
+                    r += R_P  # -4 (Goal版アフターエフェクトからの脱出罰則)
+                elif next_state in STATE_DRUG_AFTEREFFECT_SET:  # アフターエフェクト区間内での遷移
+                    r += AFTER_PHASE_REWARDS_REVERSAL  # -1.2 (Goal版アフターエフェクト罰則)
+        else:
+            # === 通常フェーズ（pre-drug, addiction）の報酬ロジック ===
+            # 状態0でagした際（Goal報酬）
+            if current_state == STATE_GOAL and action == ACTION_GOAL and next_state == STATE_START:
+                r += PHASE_GOAL_REWARDS[phase_idx]  # Goal報酬=1.0
+            # 状態6でadした際（薬物報酬）
+            elif (current_state == NEUTRAL_MAX and action == ACTION_DRUG and next_state == STATE_DRUG):
+                r += PHASE_DRUG_REWARDS[phase_idx]
+            
+            # アフターエフェクト区間での報酬設計
+            if current_state in STATE_DRUG_AFTEREFFECT_SET:
+                if next_state == STATE_START:  # 状態4への遷移
+                    r += R_P  # -4 (f1, f2共通)
+                elif next_state in STATE_DRUG_AFTEREFFECT_SET:  # アフターエフェクト区間内での遷移
+                    r += AFTER_PHASE_REWARDS[phase_idx]  # f1: -0.3, f2: -1.2
         
-        # Neutralエリアでのロングジャンプ失敗コストなどは簡略化のため省略せず実装
+        # Neutralエリアでのロングジャンプ失敗コスト（全フェーズ共通）
         if (current_state in STATE_NEUTRAL_SET and next_state in STATE_NEUTRAL_SET 
             and abs(next_state - current_state) > 1):
             r += R_SKIP_LONG
-        
-        # アフターエフェクト区間での報酬設計
-        if current_state in STATE_DRUG_AFTEREFFECT_SET:
-            if next_state == STATE_START:  # 状態4への遷移
-                r += R_P  # -4 (f1, f2共通)
-            elif next_state in STATE_DRUG_AFTEREFFECT_SET:  # アフターエフェクト区間内での遷移
-                r += AFTER_PHASE_REWARDS[phase_idx]  # f1: -0.3, f2: -1.2
-            # それ以外(Neutral/Goalへの遷移)は報酬0
             
         return r
 
@@ -562,13 +610,30 @@ def simulate(
     debug_txt_path: Optional[str] = None,
     collect_beta_stats: bool = False,
     fixed_beta: Optional[float] = None,
-) -> Tuple[float, List[float], Optional[BetaStatistics]]:
+) -> Tuple[float, List[float], float, List[float], dict, Optional[BetaStatistics]]:
+    """
+    シミュレーションを実行する。
     
+    Returns:
+        Tuple of:
+        - overall_addiction_rate: 全体の依存率
+        - run_addiction_rates: 各ラン毎の依存率
+        - overall_reversal_adaptation_rate: 全体のreversal適応率
+        - run_reversal_rates: 各ラン毎のreversal適応率
+        - state_visit_stats: 状態訪問統計（フェーズ別）
+        - beta_stats: β統計情報（収集した場合）
+    """
     addictions = 0
+    reversal_adaptations = 0  # reversal適応したエージェント数
     total_agents = num_agents * num_runs
     debug_records = []
     # ラン毎の依存者数を記録（後で run ごとの率に変換）
     run_addictions = [0 for _ in range(num_runs)]
+    run_reversal_adaptations = [0 for _ in range(num_runs)]  # reversal適応数
+    
+    # 状態訪問統計（全エージェント集計用）
+    total_addiction_state_visits = np.zeros(NUM_STATES, dtype=np.int64)
+    total_reversal_state_visits = np.zeros(NUM_STATES, dtype=np.int64)
     
     # β統計収集用（全エージェント）
     beta_stats = None
@@ -616,7 +681,7 @@ def simulate(
                 agent_phase_history = [] if collect_beta_stats else None
                 
                 # フェーズ実行
-                for phase_idx, (_, length, _) in enumerate(PHASES):
+                for phase_idx, (_, length, _, _) in enumerate(PHASES):
                     # フェーズ開始時にSTATE_STARTにリセット
                     # if phase_idx > 0:
                     #     state = env.reset()
@@ -714,7 +779,14 @@ def simulate(
                                 "next_state": next_state,
                             })
                         
-                        # 統計収集 (Addictionフェーズのみ)
+                        # === 状態訪問統計の収集 ===
+                        if phase_idx == 1:  # Addictionフェーズ
+                            counts.addiction_phase_state_visits[state] += 1
+                        elif phase_idx == 2:  # Reversalフェーズ
+                            counts.reversal_phase_state_visits[state] += 1
+                        
+                        # 統計収集 (AddictionフェーズとReversalフェーズ)
+                        # === Addictionフェーズ (phase_idx=1) ===
                         # Drug選択: 
                         #   1. Neutral最終状態(6)からDrug行動でDrug状態(7)へ遷移
                         #   2. アフターエフェクト区域(Drug状態含む)に滞在/行動して罰則を受けた時
@@ -730,15 +802,43 @@ def simulate(
                             elif (state == STATE_GOAL and action == ACTION_GOAL 
                                   and next_state == STATE_START):
                                 counts.healthy_choices += 1
+                        
+                        # === Reversalフェーズ (phase_idx=2) ===
+                        # 報酬が逆転: Goal=依存的(高報酬+アフターエフェクト), Drug=健康的(低報酬+直接戻る)
+                        # Goal選択(依存的): Goal状態(0)→Goal行動→Drug状態(7)へ(アフターエフェクト入り)
+                        # Drug選択(健康的): Neutral最終(6)→Drug行動→Start(3)へ(直接戻る)
+                        elif phase_idx == 2:
+                            if (state == STATE_GOAL and action == ACTION_GOAL 
+                                and next_state == STATE_DRUG):
+                                counts.reversal_goal_choices += 1  # Goal選択（reversalでは依存的）
+                            elif (state == STATE_DRUG or state in STATE_AFTER_SET) and \
+                                 (next_state == STATE_DRUG or next_state in STATE_AFTER_SET):
+                                # Goal版アフターエフェクト区域内に留まった場合
+                                counts.reversal_goal_choices += 1
+                            elif (state == NEUTRAL_MAX and action == ACTION_DRUG 
+                                  and next_state == STATE_START):
+                                counts.reversal_drug_choices += 1  # Drug選択（reversalでは健康的）
                                 
                         state = next_state
                         global_step += 1
                 
-                # 依存判定
+                # 依存判定（addictionフェーズ）
                 is_addicted = counts.drug_choices > counts.healthy_choices
                 if is_addicted:
                     addictions += 1
                     run_addictions[seed_idx] += 1
+                
+                # reversal適応度判定（reversalフェーズで健康的選択が多いほど良い適応）
+                # reversal_drug_choices = 健康的（新環境に適応）
+                # reversal_goal_choices = 依存的（旧環境の習慣を継続）
+                reversal_adapted = counts.reversal_drug_choices > counts.reversal_goal_choices
+                if reversal_adapted:
+                    reversal_adaptations += 1
+                    run_reversal_adaptations[seed_idx] += 1
+                
+                # 状態訪問統計を集計
+                total_addiction_state_visits += counts.addiction_phase_state_visits
+                total_reversal_state_visits += counts.reversal_phase_state_visits
                 
                 # β統計を集約（依存状態も含める）
                 if collect_beta_stats:
@@ -750,10 +850,13 @@ def simulate(
 
                 if debug_episode and seed_idx == 0 and agent_idx == 0 and log_file:
                     log_file.write(f"Final Counts - Drug Choices: {counts.drug_choices}, Healthy Choices: {counts.healthy_choices}\n")
+                    log_file.write(f"Reversal Counts - Goal Choices (addictive): {counts.reversal_goal_choices}, Drug Choices (healthy): {counts.reversal_drug_choices}\n")
+                    log_file.write(f"Reversal Adaptation: {'Adapted' if reversal_adapted else 'Not Adapted'}\n")
             
             # Run終了時の統計表示
             run_addiction_rate = run_addictions[seed_idx] / num_agents * 100
-            print(f"  [Run {seed_idx + 1}/{num_runs}] Completed! Final addiction rate: {run_addiction_rate:.2f}% ({run_addictions[seed_idx]}/{num_agents} agents)")
+            run_reversal_rate = run_reversal_adaptations[seed_idx] / num_agents * 100
+            print(f"  [Run {seed_idx + 1}/{num_runs}] Completed! Addiction rate: {run_addiction_rate:.2f}%, Reversal adaptation rate: {run_reversal_rate:.2f}%")
     finally:
         if log_file:
             log_file.close()
@@ -763,7 +866,8 @@ def simulate(
         if debug_csv_path:
             csv_path = debug_csv_path
         else:
-            csv_path = f"debug_episode_beta_{beta:.2f}.csv"
+            beta_str = f"{fixed_beta:.2f}" if fixed_beta is not None else "learning"
+            csv_path = f"debug_episode_beta_{beta_str}.csv"
         fieldnames = [
             "phase_name",
             "phase_idx",
@@ -782,8 +886,26 @@ def simulate(
 
     # run ごとの率を計算して返す
     run_rates = [cnt / num_agents for cnt in run_addictions]
+    run_reversal_rates = [cnt / num_agents for cnt in run_reversal_adaptations]
     overall_rate = addictions / total_agents
-    return overall_rate, run_rates, beta_stats
+    overall_reversal_rate = reversal_adaptations / total_agents
+    
+    # 状態訪問統計を割合に変換
+    addiction_total_steps = np.sum(total_addiction_state_visits)
+    reversal_total_steps = np.sum(total_reversal_state_visits)
+    
+    addiction_state_ratios = (total_addiction_state_visits / addiction_total_steps * 100).tolist() if addiction_total_steps > 0 else [0.0] * NUM_STATES
+    reversal_state_ratios = (total_reversal_state_visits / reversal_total_steps * 100).tolist() if reversal_total_steps > 0 else [0.0] * NUM_STATES
+    
+    # 統計結果を辞書で返す
+    state_visit_stats = {
+        "addiction_state_ratios": addiction_state_ratios,
+        "reversal_state_ratios": reversal_state_ratios,
+        "addiction_total_steps": int(addiction_total_steps),
+        "reversal_total_steps": int(reversal_total_steps),
+    }
+    
+    return overall_rate, run_rates, overall_reversal_rate, run_reversal_rates, state_visit_stats, beta_stats
 
 
 
@@ -1584,7 +1706,7 @@ def main():
     if args.debug_episode:
         debug_txt_path = "debug_log_learn_beta.txt"
 
-    overall_rate, run_rates, beta_stats = simulate(
+    overall_rate, run_rates, overall_reversal_rate, run_reversal_rates, state_visit_stats, beta_stats = simulate(
         args.num_agents,
         args.num_runs,
         args.seed,
@@ -1597,21 +1719,29 @@ def main():
         fixed_beta=args.fixed_beta,
     )
     
-    mean_percent = np.mean(run_rates) * 100.0
-    print(f"Result: Addiction Rate={mean_percent:.2f}% (mean over runs)")
+    mean_addiction_percent = np.mean(run_rates) * 100.0
+    mean_reversal_percent = np.mean(run_reversal_rates) * 100.0
+    print(f"Result: Addiction Rate={mean_addiction_percent:.2f}%, Reversal Adaptation Rate={mean_reversal_percent:.2f}% (mean over runs)")
     print("-" * 60)
 
     # 結果をファイルに出力（並列実行用）
     if args.output is not None:
         import json
         output_data = {
-            "addiction_rate": mean_percent,
+            "addiction_rate": mean_addiction_percent,
+            "reversal_adaptation_rate": mean_reversal_percent,
             "run_rates": [r * 100.0 for r in run_rates],
+            "run_reversal_rates": [r * 100.0 for r in run_reversal_rates],
+            "addiction_state_ratios": state_visit_stats["addiction_state_ratios"],
+            "reversal_state_ratios": state_visit_stats["reversal_state_ratios"],
+            "addiction_total_steps": state_visit_stats["addiction_total_steps"],
+            "reversal_total_steps": state_visit_stats["reversal_total_steps"],
             "num_agents": args.num_agents,
             "num_runs": args.num_runs,
             "seed": args.seed,
             "mb_forget": args.mb_forget,
-            "beta_learning": True,
+            "beta_learning": args.fixed_beta is None,
+            "fixed_beta": args.fixed_beta,
         }
         with open(args.output, 'w') as f:
             json.dump(output_data, f, indent=2)
@@ -1622,10 +1752,15 @@ def main():
     print("\n" + "=" * 60)
     print("SUMMARY")
     print("=" * 60)
-    print(f"Overall Addiction Rate: {mean_percent:.2f}%")
-    print(f"Standard Error: {np.std(run_rates) * 100.0 / np.sqrt(len(run_rates)):.2f}%")
-    print(f"Min Rate: {np.min(run_rates) * 100.0:.2f}%")
-    print(f"Max Rate: {np.max(run_rates) * 100.0:.2f}%")
+    print(f"Overall Addiction Rate: {mean_addiction_percent:.2f}%")
+    print(f"Standard Error (Addiction): {np.std(run_rates) * 100.0 / np.sqrt(len(run_rates)):.2f}%")
+    print(f"Min Rate (Addiction): {np.min(run_rates) * 100.0:.2f}%")
+    print(f"Max Rate (Addiction): {np.max(run_rates) * 100.0:.2f}%")
+    print("-" * 40)
+    print(f"Overall Reversal Adaptation Rate: {mean_reversal_percent:.2f}%")
+    print(f"Standard Error (Reversal): {np.std(run_reversal_rates) * 100.0 / np.sqrt(len(run_reversal_rates)):.2f}%")
+    print(f"Min Rate (Reversal): {np.min(run_reversal_rates) * 100.0:.2f}%")
+    print(f"Max Rate (Reversal): {np.max(run_reversal_rates) * 100.0:.2f}%")
     
     # β選択の分析グラフを生成
     if args.plot_beta and beta_stats is not None:

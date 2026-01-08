@@ -38,8 +38,16 @@ def load_results(results_dir: Path):
                     'mode': 'fixed',
                     'mean_rate': data['addiction_rate'],
                     'run_rates': data['run_rates'],
-                    'std': np.std(data['run_rates']) * 100,
-                    'sem': np.std(data['run_rates']) * 100 / np.sqrt(len(data['run_rates']))
+                    'std': np.std(data['run_rates']),
+                    'sem': np.std(data['run_rates']) / np.sqrt(len(data['run_rates'])),
+                    # Reversal関連
+                    'reversal_rate': data.get('reversal_adaptation_rate', 0.0),
+                    'run_reversal_rates': data.get('run_reversal_rates', []),
+                    'reversal_std': np.std(data.get('run_reversal_rates', [0])),
+                    'reversal_sem': np.std(data.get('run_reversal_rates', [0])) / np.sqrt(max(1, len(data.get('run_reversal_rates', [0])))),
+                    # 状態訪問統計
+                    'addiction_state_ratios': data.get('addiction_state_ratios', [0.0] * 22),
+                    'reversal_state_ratios': data.get('reversal_state_ratios', [0.0] * 22),
                 }
         else:
             print(f"警告: {file_path} が見つかりません")
@@ -54,8 +62,16 @@ def load_results(results_dir: Path):
                 'mode': 'learning',
                 'mean_rate': data['addiction_rate'],
                 'run_rates': data['run_rates'],
-                'std': np.std(data['run_rates']) * 100,
-                'sem': np.std(data['run_rates']) * 100 / np.sqrt(len(data['run_rates']))
+                'std': np.std(data['run_rates']),
+                'sem': np.std(data['run_rates']) / np.sqrt(len(data['run_rates'])),
+                # Reversal関連
+                'reversal_rate': data.get('reversal_adaptation_rate', 0.0),
+                'run_reversal_rates': data.get('run_reversal_rates', []),
+                'reversal_std': np.std(data.get('run_reversal_rates', [0])),
+                'reversal_sem': np.std(data.get('run_reversal_rates', [0])) / np.sqrt(max(1, len(data.get('run_reversal_rates', [0])))),
+                # 状態訪問統計
+                'addiction_state_ratios': data.get('addiction_state_ratios', [0.0] * 22),
+                'reversal_state_ratios': data.get('reversal_state_ratios', [0.0] * 22),
             }
     else:
         print(f"警告: {learning_path} が見つかりません")
@@ -275,6 +291,339 @@ def plot_comparison(results, output_prefix="beta_comparison"):
         print(f"  標準偏差: {data['std']:.2f}%")
         run_rates_pct = data['run_rates']  # 既にパーセント値
         print(f"  範囲: {min(run_rates_pct):.2f}% - {max(run_rates_pct):.2f}%")
+        if 'reversal_rate' in data:
+            print(f"  Reversal適応率: {data['reversal_rate']:.2f}% ± {data['reversal_sem']:.2f}%")
+    
+    print("\n" + "=" * 60)
+
+
+def plot_reversal_analysis(results, output_prefix="reversal_analysis"):
+    """Reversalフェーズの適応度分析グラフを作成"""
+    
+    # 固定β値とLearningモードの結果を分離
+    fixed_betas = [k for k in results.keys() if k.startswith("β=") and k != "β=Learning"]
+    fixed_betas.sort(key=lambda x: float(x.split("=")[1]))
+    
+    # ===== Figure 1: Reversal適応率の比較（棒グラフ） =====
+    fig1, ax1 = plt.subplots(figsize=(14, 8))
+    
+    labels = []
+    reversal_rates = []
+    reversal_sems = []
+    colors = []
+    
+    for label in fixed_betas:
+        labels.append(label)
+        reversal_rates.append(results[label]['reversal_rate'])
+        reversal_sems.append(results[label]['reversal_sem'])
+        colors.append('#3498db')
+    
+    if "β=Learning" in results:
+        labels.append("Learning\n(Adaptive)")
+        reversal_rates.append(results["β=Learning"]['reversal_rate'])
+        reversal_sems.append(results["β=Learning"]['reversal_sem'])
+        colors.append('#e74c3c')
+    
+    x_pos = np.arange(len(labels))
+    bars = ax1.bar(x_pos, reversal_rates, yerr=reversal_sems,
+                   color=colors, alpha=0.7, capsize=10,
+                   edgecolor='black', linewidth=1.5)
+    
+    for bar, rate, sem in zip(bars, reversal_rates, reversal_sems):
+        height = bar.get_height()
+        ax1.text(bar.get_x() + bar.get_width()/2, height + sem + 1,
+                f'{rate:.2f}%\n±{sem:.2f}',
+                ha='center', va='bottom', fontsize=10, fontweight='bold')
+    
+    ax1.set_xlabel('β値 / モード', fontsize=14, fontweight='bold')
+    ax1.set_ylabel('Reversal適応率 (%)', fontsize=14, fontweight='bold')
+    ax1.set_title('Reversalフェーズ適応率の比較\n(環境変化への適応度)', fontsize=16, fontweight='bold', pad=20)
+    ax1.set_xticks(x_pos)
+    ax1.set_xticklabels(labels, fontsize=11)
+    ax1.grid(True, alpha=0.3, axis='y')
+    ax1.set_ylim(0, max(reversal_rates) + max(reversal_sems) + 15 if reversal_rates else 100)
+    
+    from matplotlib.patches import Patch
+    legend_elements = [
+        Patch(facecolor='#3498db', alpha=0.7, edgecolor='black', label='固定β値'),
+        Patch(facecolor='#e74c3c', alpha=0.7, edgecolor='black', label='β学習モード')
+    ]
+    ax1.legend(handles=legend_elements, loc='upper right', fontsize=11)
+    
+    plt.tight_layout()
+    plt.savefig(f"{output_prefix}_reversal_bar.png", dpi=150, bbox_inches='tight')
+    print(f"保存: {output_prefix}_reversal_bar.png")
+    plt.close()
+    
+    # ===== Figure 2: Addiction Rate vs Reversal Adaptation Rate =====
+    fig2, ax2 = plt.subplots(figsize=(12, 8))
+    
+    addiction_rates = []
+    reversal_rates_list = []
+    marker_labels = []
+    marker_colors = []
+    
+    for label in fixed_betas:
+        addiction_rates.append(results[label]['mean_rate'])
+        reversal_rates_list.append(results[label]['reversal_rate'])
+        marker_labels.append(label)
+        marker_colors.append('#3498db')
+    
+    if "β=Learning" in results:
+        addiction_rates.append(results["β=Learning"]['mean_rate'])
+        reversal_rates_list.append(results["β=Learning"]['reversal_rate'])
+        marker_labels.append("Learning")
+        marker_colors.append('#e74c3c')
+    
+    # 散布図
+    for i, (add_rate, rev_rate, label, color) in enumerate(zip(addiction_rates, reversal_rates_list, marker_labels, marker_colors)):
+        marker = 's' if label == "Learning" else 'o'
+        size = 200 if label == "Learning" else 150
+        ax2.scatter(add_rate, rev_rate, c=color, s=size, marker=marker,
+                   edgecolor='black', linewidth=1.5, alpha=0.8, zorder=3)
+        ax2.annotate(label, (add_rate, rev_rate), textcoords="offset points",
+                    xytext=(10, 10), fontsize=10, fontweight='bold')
+    
+    ax2.set_xlabel('Addictionフェーズ 依存症率 (%)', fontsize=14, fontweight='bold')
+    ax2.set_ylabel('Reversalフェーズ 適応率 (%)', fontsize=14, fontweight='bold')
+    ax2.set_title('依存症率 vs 環境変化適応率', fontsize=16, fontweight='bold', pad=20)
+    ax2.grid(True, alpha=0.3)
+    
+    # 対角線（参考）
+    max_val = max(max(addiction_rates), max(reversal_rates_list)) if addiction_rates else 100
+    ax2.plot([0, max_val], [0, max_val], 'k--', alpha=0.3, label='y=x (参考線)')
+    ax2.legend(fontsize=10)
+    
+    plt.tight_layout()
+    plt.savefig(f"{output_prefix}_addiction_vs_reversal.png", dpi=150, bbox_inches='tight')
+    print(f"保存: {output_prefix}_addiction_vs_reversal.png")
+    plt.close()
+    
+    # ===== Figure 3: 状態0（Goal状態）訪問割合の比較 =====
+    fig3, axes3 = plt.subplots(1, 2, figsize=(16, 7))
+    
+    # Addictionフェーズでの状態0訪問率
+    ax3_add = axes3[0]
+    state0_addiction = []
+    state0_labels = []
+    state0_colors = []
+    
+    for label in fixed_betas:
+        state0_addiction.append(results[label]['addiction_state_ratios'][0])
+        state0_labels.append(label)
+        state0_colors.append('#3498db')
+    
+    if "β=Learning" in results:
+        state0_addiction.append(results["β=Learning"]['addiction_state_ratios'][0])
+        state0_labels.append("Learning")
+        state0_colors.append('#e74c3c')
+    
+    x_pos = np.arange(len(state0_labels))
+    bars_add = ax3_add.bar(x_pos, state0_addiction, color=state0_colors, alpha=0.7,
+                            edgecolor='black', linewidth=1.5)
+    
+    for bar, rate in zip(bars_add, state0_addiction):
+        ax3_add.text(bar.get_x() + bar.get_width()/2, bar.get_height() + 0.5,
+                    f'{rate:.2f}%', ha='center', va='bottom', fontsize=10, fontweight='bold')
+    
+    ax3_add.set_xlabel('β値 / モード', fontsize=12, fontweight='bold')
+    ax3_add.set_ylabel('状態0（Goal）訪問割合 (%)', fontsize=12, fontweight='bold')
+    ax3_add.set_title('Addictionフェーズ\n状態0（Goal）訪問割合', fontsize=14, fontweight='bold')
+    ax3_add.set_xticks(x_pos)
+    ax3_add.set_xticklabels(state0_labels, fontsize=10)
+    ax3_add.grid(True, alpha=0.3, axis='y')
+    
+    # Reversalフェーズでの状態0訪問率
+    ax3_rev = axes3[1]
+    state0_reversal = []
+    
+    for label in fixed_betas:
+        state0_reversal.append(results[label]['reversal_state_ratios'][0])
+    
+    if "β=Learning" in results:
+        state0_reversal.append(results["β=Learning"]['reversal_state_ratios'][0])
+    
+    bars_rev = ax3_rev.bar(x_pos, state0_reversal, color=state0_colors, alpha=0.7,
+                            edgecolor='black', linewidth=1.5)
+    
+    for bar, rate in zip(bars_rev, state0_reversal):
+        ax3_rev.text(bar.get_x() + bar.get_width()/2, bar.get_height() + 0.5,
+                    f'{rate:.2f}%', ha='center', va='bottom', fontsize=10, fontweight='bold')
+    
+    ax3_rev.set_xlabel('β値 / モード', fontsize=12, fontweight='bold')
+    ax3_rev.set_ylabel('状態0（Goal）訪問割合 (%)', fontsize=12, fontweight='bold')
+    ax3_rev.set_title('Reversalフェーズ\n状態0（Goal）訪問割合\n※Reversalでは高いほど依存的', fontsize=14, fontweight='bold')
+    ax3_rev.set_xticks(x_pos)
+    ax3_rev.set_xticklabels(state0_labels, fontsize=10)
+    ax3_rev.grid(True, alpha=0.3, axis='y')
+    
+    plt.tight_layout()
+    plt.savefig(f"{output_prefix}_state0_comparison.png", dpi=150, bbox_inches='tight')
+    print(f"保存: {output_prefix}_state0_comparison.png")
+    plt.close()
+    
+    # ===== Figure 4: 状態訪問分布のヒートマップ比較 =====
+    fig4, axes4 = plt.subplots(2, 1, figsize=(18, 12))
+    
+    # データ準備
+    all_labels = fixed_betas + (["β=Learning"] if "β=Learning" in results else [])
+    num_states = 22
+    
+    # Addictionフェーズ
+    addiction_matrix = np.zeros((len(all_labels), num_states))
+    for i, label in enumerate(all_labels):
+        addiction_matrix[i, :] = results[label]['addiction_state_ratios']
+    
+    ax4_add = axes4[0]
+    im_add = ax4_add.imshow(addiction_matrix, aspect='auto', cmap='YlOrRd', interpolation='nearest')
+    cbar_add = plt.colorbar(im_add, ax=ax4_add)
+    cbar_add.set_label('訪問割合 (%)', fontsize=12)
+    ax4_add.set_xlabel('状態番号', fontsize=12, fontweight='bold')
+    ax4_add.set_ylabel('β値 / モード', fontsize=12, fontweight='bold')
+    ax4_add.set_title('Addictionフェーズ - 状態訪問分布', fontsize=14, fontweight='bold')
+    ax4_add.set_xticks(range(num_states))
+    ax4_add.set_yticks(range(len(all_labels)))
+    ax4_add.set_yticklabels([l.replace("β=", "") for l in all_labels])
+    
+    # 重要な状態をハイライト
+    for s in [0, 3, 6, 7]:  # Goal, Start, Neutral最終, Drug
+        ax4_add.axvline(s - 0.5, color='blue', linewidth=2, alpha=0.5)
+        ax4_add.axvline(s + 0.5, color='blue', linewidth=2, alpha=0.5)
+    
+    # Reversalフェーズ
+    reversal_matrix = np.zeros((len(all_labels), num_states))
+    for i, label in enumerate(all_labels):
+        reversal_matrix[i, :] = results[label]['reversal_state_ratios']
+    
+    ax4_rev = axes4[1]
+    im_rev = ax4_rev.imshow(reversal_matrix, aspect='auto', cmap='YlGnBu', interpolation='nearest')
+    cbar_rev = plt.colorbar(im_rev, ax=ax4_rev)
+    cbar_rev.set_label('訪問割合 (%)', fontsize=12)
+    ax4_rev.set_xlabel('状態番号', fontsize=12, fontweight='bold')
+    ax4_rev.set_ylabel('β値 / モード', fontsize=12, fontweight='bold')
+    ax4_rev.set_title('Reversalフェーズ - 状態訪問分布', fontsize=14, fontweight='bold')
+    ax4_rev.set_xticks(range(num_states))
+    ax4_rev.set_yticks(range(len(all_labels)))
+    ax4_rev.set_yticklabels([l.replace("β=", "") for l in all_labels])
+    
+    for s in [0, 3, 6, 7]:
+        ax4_rev.axvline(s - 0.5, color='blue', linewidth=2, alpha=0.5)
+        ax4_rev.axvline(s + 0.5, color='blue', linewidth=2, alpha=0.5)
+    
+    plt.tight_layout()
+    plt.savefig(f"{output_prefix}_state_heatmap.png", dpi=150, bbox_inches='tight')
+    print(f"保存: {output_prefix}_state_heatmap.png")
+    plt.close()
+    
+    # ===== Figure 5: 健康的状態 vs 依存的状態の訪問割合 =====
+    fig5, axes5 = plt.subplots(1, 2, figsize=(16, 7))
+    
+    # Neutral状態(1-6)の合計 vs Drug/After状態(7-21)の合計
+    # Addictionフェーズ
+    neutral_addiction = []
+    drug_addiction = []
+    
+    for label in all_labels:
+        ratios = results[label]['addiction_state_ratios']
+        neutral_addiction.append(sum(ratios[1:7]))  # 状態1-6
+        drug_addiction.append(sum(ratios[7:]))       # 状態7-21
+    
+    ax5_add = axes5[0]
+    x_pos = np.arange(len(all_labels))
+    width = 0.35
+    
+    bars_neutral = ax5_add.bar(x_pos - width/2, neutral_addiction, width, 
+                               label='Neutral区間 (1-6)', color='#2ecc71', alpha=0.7,
+                               edgecolor='black', linewidth=1)
+    bars_drug = ax5_add.bar(x_pos + width/2, drug_addiction, width,
+                            label='Drug/After区間 (7-21)', color='#e74c3c', alpha=0.7,
+                            edgecolor='black', linewidth=1)
+    
+    ax5_add.set_xlabel('β値 / モード', fontsize=12, fontweight='bold')
+    ax5_add.set_ylabel('訪問割合 (%)', fontsize=12, fontweight='bold')
+    ax5_add.set_title('Addictionフェーズ\nNeutral区間 vs Drug/After区間', fontsize=14, fontweight='bold')
+    ax5_add.set_xticks(x_pos)
+    ax5_add.set_xticklabels([l.replace("β=", "") for l in all_labels], fontsize=10)
+    ax5_add.legend(fontsize=10)
+    ax5_add.grid(True, alpha=0.3, axis='y')
+    
+    # Reversalフェーズ
+    neutral_reversal = []
+    drug_reversal = []
+    
+    for label in all_labels:
+        ratios = results[label]['reversal_state_ratios']
+        neutral_reversal.append(sum(ratios[1:7]))
+        drug_reversal.append(sum(ratios[7:]))
+    
+    ax5_rev = axes5[1]
+    
+    bars_neutral_rev = ax5_rev.bar(x_pos - width/2, neutral_reversal, width,
+                                   label='Neutral区間 (1-6) ※健康的', color='#2ecc71', alpha=0.7,
+                                   edgecolor='black', linewidth=1)
+    bars_drug_rev = ax5_rev.bar(x_pos + width/2, drug_reversal, width,
+                                label='Drug/After区間 (7-21) ※依存的', color='#e74c3c', alpha=0.7,
+                                edgecolor='black', linewidth=1)
+    
+    ax5_rev.set_xlabel('β値 / モード', fontsize=12, fontweight='bold')
+    ax5_rev.set_ylabel('訪問割合 (%)', fontsize=12, fontweight='bold')
+    ax5_rev.set_title('Reversalフェーズ\nNeutral区間 vs Drug/After区間\n(Reversalでは報酬が逆転)', fontsize=14, fontweight='bold')
+    ax5_rev.set_xticks(x_pos)
+    ax5_rev.set_xticklabels([l.replace("β=", "") for l in all_labels], fontsize=10)
+    ax5_rev.legend(fontsize=10)
+    ax5_rev.grid(True, alpha=0.3, axis='y')
+    
+    plt.tight_layout()
+    plt.savefig(f"{output_prefix}_neutral_vs_drug.png", dpi=150, bbox_inches='tight')
+    print(f"保存: {output_prefix}_neutral_vs_drug.png")
+    plt.close()
+    
+    # ===== Figure 6: 総合比較（Addiction Rate + Reversal Adaptation Rate） =====
+    fig6, ax6 = plt.subplots(figsize=(14, 8))
+    
+    x_pos = np.arange(len(all_labels))
+    width = 0.35
+    
+    addiction_rates_all = [results[label]['mean_rate'] for label in all_labels]
+    reversal_rates_all = [results[label]['reversal_rate'] for label in all_labels]
+    addiction_sems = [results[label]['sem'] for label in all_labels]
+    reversal_sems = [results[label]['reversal_sem'] for label in all_labels]
+    
+    colors_addiction = ['#3498db'] * len(fixed_betas) + (['#c0392b'] if "β=Learning" in results else [])
+    colors_reversal = ['#2980b9'] * len(fixed_betas) + (['#e74c3c'] if "β=Learning" in results else [])
+    
+    bars_add = ax6.bar(x_pos - width/2, addiction_rates_all, width, yerr=addiction_sems,
+                       label='Addiction依存症率', color='#e74c3c', alpha=0.7,
+                       capsize=5, edgecolor='black', linewidth=1)
+    bars_rev = ax6.bar(x_pos + width/2, reversal_rates_all, width, yerr=reversal_sems,
+                       label='Reversal適応率', color='#2ecc71', alpha=0.7,
+                       capsize=5, edgecolor='black', linewidth=1)
+    
+    ax6.set_xlabel('β値 / モード', fontsize=14, fontweight='bold')
+    ax6.set_ylabel('割合 (%)', fontsize=14, fontweight='bold')
+    ax6.set_title('β値別: 依存症率 vs 環境変化適応率\n(Learningモードは赤系統)', fontsize=16, fontweight='bold', pad=20)
+    ax6.set_xticks(x_pos)
+    ax6.set_xticklabels([l.replace("β=", "") for l in all_labels], fontsize=11)
+    ax6.legend(fontsize=12, loc='upper right')
+    ax6.grid(True, alpha=0.3, axis='y')
+    
+    plt.tight_layout()
+    plt.savefig(f"{output_prefix}_combined_comparison.png", dpi=150, bbox_inches='tight')
+    print(f"保存: {output_prefix}_combined_comparison.png")
+    plt.close()
+    
+    # ===== Reversal統計サマリー出力 =====
+    print("\n" + "=" * 60)
+    print("Reversalフェーズ適応分析 - 統計サマリー")
+    print("=" * 60)
+    
+    for label in all_labels:
+        data = results[label]
+        print(f"\n{label}:")
+        print(f"  Reversal適応率: {data['reversal_rate']:.2f}% ± {data['reversal_sem']:.2f}%")
+        print(f"  状態0訪問率 (Addiction): {data['addiction_state_ratios'][0]:.2f}%")
+        print(f"  状態0訪問率 (Reversal): {data['reversal_state_ratios'][0]:.2f}%")
+        print(f"  Drug区間訪問率 (Reversal): {sum(data['reversal_state_ratios'][7:]):.2f}%")
     
     print("\n" + "=" * 60)
 
@@ -311,9 +660,11 @@ def main():
         return
     
     print(f"{len(results)} 個の結果を読み込みました")
-    print("\nグラフを作成中...")
-    
+    print("\n=== 基本比較グラフを作成中 ===")
     plot_comparison(results, args.output_prefix)
+    
+    print("\n=== Reversal適応分析グラフを作成中 ===")
+    plot_reversal_analysis(results, args.output_prefix)
     
     print("\n完了！")
 

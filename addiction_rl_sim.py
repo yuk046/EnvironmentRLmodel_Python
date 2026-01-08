@@ -409,9 +409,10 @@ class AddictionEnvironment:
 
 
 class HybridAgent:
-    def __init__(self, rng: np.random.Generator, mb_forget: bool = False):
+    def __init__(self, rng: np.random.Generator, mb_forget: bool = False, fixed_beta: Optional[float] = None):
         self.rng = rng
         self.mb_forget = mb_forget
+        self.fixed_beta = fixed_beta  # 固定β値(Noneの場合は学習モード)
         
         # Qテーブル (MF, MB)
         self.q_mf = np.zeros((NUM_STATES, NUM_ACTIONS), dtype=np.float64)
@@ -421,6 +422,10 @@ class HybridAgent:
         self.q_beta = np.zeros(len(BETA_VALUES), dtype=np.float64)
         self.current_beta_idx = 0  # 現在選択されているβのインデックス
         self.prev_beta_idx = None  # β選択のQ学習用に前のβインデックスを記憶
+        
+        # 固定β値モードの場合、対応するインデックスを設定
+        if self.fixed_beta is not None:
+            self.current_beta_idx = np.argmin(np.abs(BETA_VALUES - self.fixed_beta))
         
         # メンタルモデル (Numba用にfloat64で定義)
         # [今の状態, 行動, 次の状態] に何回遷移したかを記録する3次元配列
@@ -441,7 +446,11 @@ class HybridAgent:
                 self.model_observed[s, a, s] = True  # 初期状態も観測済みとしてマーク
 
     def select_beta(self) -> int:
-        """β値を選択する（ε-greedy）"""
+        """β値を選択する（ε-greedy or 固定値）"""
+        # 固定β値モードの場合は常に同じインデックスを返す
+        if self.fixed_beta is not None:
+            return self.current_beta_idx
+        
         # ε-Greedy でβを選択
         if self.rng.random() < EPSILON_BETA:
             return int(self.rng.integers(len(BETA_VALUES)))
@@ -475,8 +484,8 @@ class HybridAgent:
 
     # モデルの学習機構
     def observe(self, state: int, action: int, reward: float, next_state: int, phase_idx: int):
-        # --- β学習の更新 ---
-        if self.prev_beta_idx is not None:
+        # --- β学習の更新(固定β値モードではスキップ) ---
+        if self.fixed_beta is None and self.prev_beta_idx is not None:
             # 前のステップで選択したβのQ値を更新
             # TD学習: Q(β) ← Q(β) + α * (R + γ*max_β' Q(β') - Q(β))
             td_target_beta = reward + DISCOUNT * np.max(self.q_beta)
@@ -484,8 +493,9 @@ class HybridAgent:
                 td_target_beta - self.q_beta[self.prev_beta_idx]
             )
         
-        # 次回のβ更新のために現在のβインデックスを記憶
-        self.prev_beta_idx = self.current_beta_idx
+        # 次回のβ更新のために現在のβインデックスを記憶(固定β値モードではスキップ)
+        if self.fixed_beta is None:
+            self.prev_beta_idx = self.current_beta_idx
         
         # --- Model-Free (直感) の更新 ---
         # Q学習の式: Q(s,a) ← Q(s,a) + α * (R + γ*maxQ(s') - Q(s,a))
@@ -551,6 +561,7 @@ def simulate(
     debug_csv_path: Optional[str] = None,
     debug_txt_path: Optional[str] = None,
     collect_beta_stats: bool = False,
+    fixed_beta: Optional[float] = None,
 ) -> Tuple[float, List[float], Optional[BetaStatistics]]:
     
     addictions = 0
@@ -591,7 +602,7 @@ def simulate(
                 rng = np.random.default_rng(seed_for_agent)
 
                 env = AddictionEnvironment(rng)
-                agent = HybridAgent(rng, mb_forget=mb_forget)
+                agent = HybridAgent(rng, mb_forget=mb_forget, fixed_beta=fixed_beta)
                 
                 state = env.reset()
                 counts = PhaseResult()
@@ -781,6 +792,11 @@ def plot_beta_analysis(beta_stats: BetaStatistics, output_prefix: str = "beta_an
     """β選択の分析グラフを複数作成（全エージェントの平均±標準偏差）"""
     import matplotlib.pyplot as plt
     from matplotlib.gridspec import GridSpec
+    import matplotlib
+    
+    # 日本語フォント設定（Windows環境）
+    matplotlib.rcParams['font.family'] = ['Yu Gothic', 'MS Gothic', 'Meiryo', 'sans-serif']
+    matplotlib.rcParams['axes.unicode_minus'] = False  # マイナス記号の文字化け対策
     
     # 全エージェントのデータを2次元配列に変換
     # beta_history_all: List[List[float]] -> (num_agents, num_steps)
@@ -1350,83 +1366,106 @@ def plot_beta_analysis(beta_stats: BetaStatistics, output_prefix: str = "beta_an
         print(f"Saved: {output_prefix}_detailed_analysis.png")
         plt.close()
         
-        # ===== Figure 7: 依存/非依存エージェントのβ選択推移（各β値の使用率の時系列） =====
+        # ===== Figure 7: 依存/非依存エージェントのβ選択推移（各β値の使用率の時系列、移動平均版） =====
         fig7, axes7 = plt.subplots(2, 1, figsize=(16, 10))
         
-        # 各時刻での各β値の使用頻度を計算
-        # Addicted group
-        beta_freq_add_over_time = np.zeros((len(BETA_VALUES), len(step_array)))
-        for agent_idx, is_addicted in enumerate(addiction_array):
-            if is_addicted:
-                for t_idx, beta_val in enumerate(beta_matrix[agent_idx]):
-                    beta_idx = np.argmin(np.abs(BETA_VALUES - beta_val))
-                    beta_freq_add_over_time[beta_idx, t_idx] += 1
+        # 時間窓の設定（移動平均のウィンドウサイズ）
+        window_size = 50  # 50ステップごとの移動平均
         
-        # 正規化（各時刻での割合に変換）
+        # ウィンドウの中心位置を計算
+        n_windows = len(step_array) // window_size
+        window_centers = []
+        
+        # 各β値の使用率を時間窓ごとに計算
+        beta_usage_addicted = {beta: [] for beta in BETA_VALUES}
+        beta_usage_non_addicted = {beta: [] for beta in BETA_VALUES}
+        
         n_addicted_agents = np.sum(addiction_array)
-        if n_addicted_agents > 0:
-            beta_freq_add_over_time = beta_freq_add_over_time / n_addicted_agents * 100
-        
-        # Non-addicted group
-        beta_freq_non_over_time = np.zeros((len(BETA_VALUES), len(step_array)))
-        for agent_idx, is_addicted in enumerate(addiction_array):
-            if not is_addicted:
-                for t_idx, beta_val in enumerate(beta_matrix[agent_idx]):
-                    beta_idx = np.argmin(np.abs(BETA_VALUES - beta_val))
-                    beta_freq_non_over_time[beta_idx, t_idx] += 1
-        
-        # 正規化
         n_non_addicted_agents = len(addiction_array) - n_addicted_agents
-        if n_non_addicted_agents > 0:
-            beta_freq_non_over_time = beta_freq_non_over_time / n_non_addicted_agents * 100
         
-        # Addicted群のプロット
-        ax7_1 = axes7[0]
+        for w in range(n_windows):
+            start_idx = w * window_size
+            end_idx = min((w + 1) * window_size, len(step_array))
+            window_centers.append(step_array[start_idx + (end_idx - start_idx) // 2])
+            
+            # 依存群: この時間窓でのβ値を収集
+            window_beta_addicted = []
+            for agent_idx, is_addicted in enumerate(addiction_array):
+                if is_addicted:
+                    window_beta_addicted.extend(beta_matrix[agent_idx, start_idx:end_idx])
+            
+            # 非依存群: この時間窓でのβ値を収集
+            window_beta_non_addicted = []
+            for agent_idx, is_addicted in enumerate(addiction_array):
+                if not is_addicted:
+                    window_beta_non_addicted.extend(beta_matrix[agent_idx, start_idx:end_idx])
+            
+            # 各β値の使用率を計算（依存群）
+            if len(window_beta_addicted) > 0:
+                for beta in BETA_VALUES:
+                    usage_rate = np.sum(np.isclose(window_beta_addicted, beta)) / len(window_beta_addicted) * 100
+                    beta_usage_addicted[beta].append(usage_rate)
+            else:
+                for beta in BETA_VALUES:
+                    beta_usage_addicted[beta].append(0)
+            
+            # 各β値の使用率を計算（非依存群）
+            if len(window_beta_non_addicted) > 0:
+                for beta in BETA_VALUES:
+                    usage_rate = np.sum(np.isclose(window_beta_non_addicted, beta)) / len(window_beta_non_addicted) * 100
+                    beta_usage_non_addicted[beta].append(usage_rate)
+            else:
+                for beta in BETA_VALUES:
+                    beta_usage_non_addicted[beta].append(0)
+        
+        # カラーマップ
         colors_beta = plt.cm.viridis(np.linspace(0, 1, len(BETA_VALUES)))
-        
-        for beta_idx, beta_val in enumerate(BETA_VALUES):
-            ax7_1.plot(step_array, beta_freq_add_over_time[beta_idx], 
-                      label=f'β={beta_val:.1f}', linewidth=2, 
-                      color=colors_beta[beta_idx], alpha=0.8)
         
         # フェーズ境界
         phase_boundary = np.where(np.diff(phase_mean) != 0)[0]
+        
+        # Addicted群のプロット（上段）
+        ax7_1 = axes7[0]
+        
+        for beta_idx, beta_val in enumerate(BETA_VALUES):
+            ax7_1.plot(window_centers, beta_usage_addicted[beta_val], 
+                      'o-', label=f'β={beta_val:.1f}', linewidth=2, markersize=4,
+                      color=colors_beta[beta_idx], alpha=0.8)
+        
+        # フェーズ境界を描画
         for boundary in phase_boundary:
-            ax7_1.axvline(step_array[boundary], color='red', linestyle='--', 
-                         linewidth=2, alpha=0.7, label='Phase Transition' if boundary == phase_boundary[0] else '')
+            ax7_1.axvline(step_array[boundary], color='gray', linestyle='--', 
+                         linewidth=1.5, alpha=0.5)
         
-        ax7_1.set_xlabel('Step', fontsize=12)
         ax7_1.set_ylabel('Usage Rate (%)', fontsize=12)
-        ax7_1.set_title(f'β Selection Dynamics: Addicted Group (n={n_addicted_agents} agents)', 
+        ax7_1.set_title(f'時間窓別β使用率: 依存群 (n={n_addicted_agents} agents)', 
                        fontsize=14, fontweight='bold')
-        ax7_1.legend(loc='upper right', fontsize=10, ncol=2)
+        ax7_1.legend(loc='best', fontsize=10, ncol=3)
         ax7_1.grid(True, alpha=0.3)
-        ax7_1.set_ylim(0, 35)
         
-        # Non-addicted群のプロット
+        # Non-addicted群のプロット（下段）
         ax7_2 = axes7[1]
         
         for beta_idx, beta_val in enumerate(BETA_VALUES):
-            ax7_2.plot(step_array, beta_freq_non_over_time[beta_idx], 
-                      label=f'β={beta_val:.1f}', linewidth=2,
+            ax7_2.plot(window_centers, beta_usage_non_addicted[beta_val], 
+                      'o-', label=f'β={beta_val:.1f}', linewidth=2, markersize=4,
                       color=colors_beta[beta_idx], alpha=0.8)
         
-        # フェーズ境界
+        # フェーズ境界を描画
         for boundary in phase_boundary:
-            ax7_2.axvline(step_array[boundary], color='red', linestyle='--',
-                         linewidth=2, alpha=0.7, label='Phase Transition' if boundary == phase_boundary[0] else '')
+            ax7_2.axvline(step_array[boundary], color='gray', linestyle='--',
+                         linewidth=1.5, alpha=0.5)
         
-        ax7_2.set_xlabel('Step', fontsize=12)
+        ax7_2.set_xlabel('Step (window center)', fontsize=12)
         ax7_2.set_ylabel('Usage Rate (%)', fontsize=12)
-        ax7_2.set_title(f'β Selection Dynamics: Non-addicted Group (n={n_non_addicted_agents} agents)', 
+        ax7_2.set_title(f'時間窓別β使用率: 非依存群 (n={n_non_addicted_agents} agents)', 
                        fontsize=14, fontweight='bold')
-        ax7_2.legend(loc='upper right', fontsize=10, ncol=2)
+        ax7_2.legend(loc='best', fontsize=10, ncol=3)
         ax7_2.grid(True, alpha=0.3)
-        ax7_2.set_ylim(0, 35)
         
         plt.tight_layout()
-        plt.savefig(f"{output_prefix}_beta_transition_comparison.png", dpi=150, bbox_inches='tight')
-        print(f"Saved: {output_prefix}_beta_transition_comparison.png")
+        plt.savefig(f"{output_prefix}_usage_timeseries.png", dpi=150, bbox_inches='tight')
+        print(f"Saved: {output_prefix}_usage_timeseries.png")
         plt.close()
     
     print("\n" + "="*60)
@@ -1518,10 +1557,20 @@ def main():
         default="beta_analysis",
         help="Prefix for output plot files (default: beta_analysis)",
     )
+    parser.add_argument(
+        "--fixed-beta",
+        type=float,
+        default=None,
+        choices=[0.0, 0.2, 0.4, 0.6, 0.8, 1.0],
+        help="Fix beta to a specific value instead of learning (choices: 0.0, 0.2, 0.4, 0.6, 0.8, 1.0)",
+    )
     args = parser.parse_args()
 
     print(f"Simulation Start: Agents={args.num_agents}, Runs={args.num_runs}, Seed={args.seed}")
-    print(f"Beta Learning Mode: Enabled (learning optimal β for each state)")
+    if args.fixed_beta is not None:
+        print(f"Beta Mode: Fixed (β={args.fixed_beta})")
+    else:
+        print(f"Beta Mode: Learning (adaptive β selection)")
     print("-" * 60)
 
     def log_progress(seed, agent, n_agents, n_runs, p_idx, step, length):
@@ -1545,6 +1594,7 @@ def main():
         debug_csv_path=args.debug_csv,
         debug_txt_path=debug_txt_path,
         collect_beta_stats=args.plot_beta,
+        fixed_beta=args.fixed_beta,
     )
     
     mean_percent = np.mean(run_rates) * 100.0

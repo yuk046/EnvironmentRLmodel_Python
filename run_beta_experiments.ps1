@@ -2,7 +2,7 @@
 # 各β値で実験を並列実行し、結果をJSONファイルに保存
 
 $NUM_AGENTS = 900
-$NUM_RUNS = 1
+$NUM_RUNS = 30
 $SEED = 42
 
 # 結果保存用ディレクトリ

@@ -53,7 +53,7 @@ T_MB = 1.0           # Softmax temperature for planning
 
 # β学習用のパラメータ
 BETA_VALUES = np.array([0.0, 0.2, 0.4, 0.6, 0.8, 1.0], dtype=np.float64)  # β候補値
-ALPHA_BETA = 0.1     # βのQ学習率
+ALPHA_BETA = 0.05     # βのQ学習率
 EPSILON_BETA = 0.1   # β選択時の探索率
 
 # 報酬設定

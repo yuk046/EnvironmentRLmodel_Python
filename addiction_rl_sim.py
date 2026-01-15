@@ -409,10 +409,11 @@ class AddictionEnvironment:
 
 
 class HybridAgent:
-    def __init__(self, rng: np.random.Generator, mb_forget: bool = False, fixed_beta: Optional[float] = None):
+    def __init__(self, rng: np.random.Generator, mb_forget: bool = False, fixed_beta: Optional[float] = None, uncertainty_based_beta: bool = False):
         self.rng = rng
         self.mb_forget = mb_forget
         self.fixed_beta = fixed_beta  # 固定β値(Noneの場合は学習モード)
+        self.uncertainty_based_beta = uncertainty_based_beta  # 不確実性ベースのβ適応
         
         # Qテーブル (MF, MB)
         self.q_mf = np.zeros((NUM_STATES, NUM_ACTIONS), dtype=np.float64)
@@ -422,6 +423,14 @@ class HybridAgent:
         self.q_beta = np.zeros(len(BETA_VALUES), dtype=np.float64)
         self.current_beta_idx = 0  # 現在選択されているβのインデックス
         self.prev_beta_idx = None  # β選択のQ学習用に前のβインデックスを記憶
+        
+        # 不確実性ベースのβ適応用パラメータ
+        self.td_error_history = []  # TD誤差の履歴
+        self.td_window_size = 20  # 移動平均のウィンドウサイズ
+        self.td_error_ma = 0.0  # TD誤差の移動平均
+        self.uncertainty_threshold_low = 0.1  # 低不確実性の閾値
+        self.uncertainty_threshold_high = 0.5  # 高不確実性の閾値
+        self.current_beta_value = 0.5  # 現在のβ値（連続値）
         
         # 固定β値モードの場合、対応するインデックスを設定
         if self.fixed_beta is not None:
@@ -446,12 +455,16 @@ class HybridAgent:
                 self.model_observed[s, a, s] = True  # 初期状態も観測済みとしてマーク
 
     def select_beta(self) -> int:
-        """β値を選択する（ε-greedy or 固定値）"""
+        """β値を選択する（不確実性ベース、ε-greedy、または固定値）"""
         # 固定β値モードの場合は常に同じインデックスを返す
         if self.fixed_beta is not None:
             return self.current_beta_idx
         
-        # ε-Greedy でβを選択
+        # 不確実性ベースのβ適応
+        if self.uncertainty_based_beta:
+            return self._compute_uncertainty_based_beta()
+        
+        # ε-Greedy でβを選択（従来の方法）
         if self.rng.random() < EPSILON_BETA:
             return int(self.rng.integers(len(BETA_VALUES)))
         
@@ -459,6 +472,31 @@ class HybridAgent:
         max_val = np.max(self.q_beta)
         best_betas = np.flatnonzero(np.isclose(self.q_beta, max_val, rtol=1e-08, atol=1e-12))
         return int(self.rng.choice(best_betas))
+    
+    def _compute_uncertainty_based_beta(self) -> int:
+        """不確実性（TD誤差）に基づいてβ値を計算"""
+        # TD誤差の移動平均に基づいてβを調整
+        # 高いTD誤差 → 高い不確実性 → 高いβ (MBに依存)
+        # 低いTD誤差 → 低い不確実性 → 低いβ (MFに依存)
+        
+        if self.td_error_ma < self.uncertainty_threshold_low:
+            # 低不確実性: MF優先 (β = 0.2-0.4)
+            self.current_beta_value = 0.2 + 0.2 * (self.td_error_ma / self.uncertainty_threshold_low)
+        elif self.td_error_ma > self.uncertainty_threshold_high:
+            # 高不確実性: MB優先 (β = 0.6-1.0)
+            excess = min(self.td_error_ma - self.uncertainty_threshold_high, self.uncertainty_threshold_high)
+            self.current_beta_value = 0.6 + 0.4 * (excess / self.uncertainty_threshold_high)
+        else:
+            # 中間不確実性: 線形補間 (β = 0.4-0.6)
+            range_size = self.uncertainty_threshold_high - self.uncertainty_threshold_low
+            position = (self.td_error_ma - self.uncertainty_threshold_low) / range_size
+            self.current_beta_value = 0.4 + 0.2 * position
+        
+        # β値を[0, 1]に制限
+        self.current_beta_value = np.clip(self.current_beta_value, 0.0, 1.0)
+        
+        # 最も近いβインデックスを返す
+        return int(np.argmin(np.abs(BETA_VALUES - self.current_beta_value)))
     
     def select_action(self, state: int) -> int:
         # βを選択（状態に関係なくグローバルに選択）
@@ -500,7 +538,19 @@ class HybridAgent:
         # --- Model-Free (直感) の更新 ---
         # Q学習の式: Q(s,a) ← Q(s,a) + α * (R + γ*maxQ(s') - Q(s,a))
         td_target = reward + DISCOUNT * np.max(self.q_mf[next_state])
-        self.q_mf[state, action] += ALPHA_MF * (td_target - self.q_mf[state, action])
+        td_error = td_target - self.q_mf[state, action]
+        self.q_mf[state, action] += ALPHA_MF * td_error
+        
+        # 不確実性ベースのβ適応: TD誤差を記録
+        if self.uncertainty_based_beta:
+            abs_td_error = abs(td_error)
+            self.td_error_history.append(abs_td_error)
+            
+            # 移動平均を更新
+            if len(self.td_error_history) > self.td_window_size:
+                self.td_error_history.pop(0)
+            
+            self.td_error_ma = np.mean(self.td_error_history)
         # MB Model Update (論文準拠)
         # 1. カウント減衰
         self.model_counts *= (1.0 - MODEL_DECAY)
@@ -562,6 +612,7 @@ def simulate(
     debug_txt_path: Optional[str] = None,
     collect_beta_stats: bool = False,
     fixed_beta: Optional[float] = None,
+    uncertainty_based_beta: bool = False,
 ) -> Tuple[float, List[float], Optional[BetaStatistics]]:
     
     addictions = 0
@@ -602,7 +653,7 @@ def simulate(
                 rng = np.random.default_rng(seed_for_agent)
 
                 env = AddictionEnvironment(rng)
-                agent = HybridAgent(rng, mb_forget=mb_forget, fixed_beta=fixed_beta)
+                agent = HybridAgent(rng, mb_forget=mb_forget, fixed_beta=fixed_beta, uncertainty_based_beta=uncertainty_based_beta)
                 
                 state = env.reset()
                 counts = PhaseResult()

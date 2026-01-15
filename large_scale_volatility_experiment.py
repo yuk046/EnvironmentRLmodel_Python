@@ -353,10 +353,11 @@ class VolatileAddictionEnvironment:
 
 class AdaptiveBetaAgent:
     def __init__(self, rng: np.random.Generator, fixed_beta: Optional[float] = None, 
-                 td_threshold: float = 2.0):
+                 td_threshold: float = 2.0, use_uncertainty_beta: bool = False):
         self.rng = rng
         self.fixed_beta = fixed_beta
         self.td_error_threshold = td_threshold
+        self.use_uncertainty_beta = use_uncertainty_beta  # 不確実性ベースのβ適応を使用
         
         self.q_mf = np.zeros((NUM_STATES, NUM_ACTIONS), dtype=np.float64)
         self.q_mb = np.zeros((NUM_STATES, NUM_ACTIONS), dtype=np.float64)
@@ -369,6 +370,13 @@ class AdaptiveBetaAgent:
         self.recent_td_errors: List[float] = []
         self.td_error_window = 10
         self.beta_history: List[float] = []
+        
+        # 不確実性ベースβ適応用パラメータ
+        self.td_window_size = 20
+        self.td_error_ma = 0.0
+        self.uncertainty_threshold_low = 0.1
+        self.uncertainty_threshold_high = 0.5
+        self.current_beta_value = 0.5
         
         if self.fixed_beta is not None:
             self.current_beta_idx = np.argmin(np.abs(BETA_VALUES - self.fixed_beta))
@@ -388,6 +396,11 @@ class AdaptiveBetaAgent:
         if self.fixed_beta is not None:
             return self.current_beta_idx
         
+        # 不確実性ベースのβ適応
+        if self.use_uncertainty_beta:
+            return self._compute_uncertainty_based_beta()
+        
+        # 従来のTD誤差バイアス方式
         if len(self.recent_td_errors) >= 3:
             avg_td_error = np.mean(np.abs(self.recent_td_errors[-3:]))
             if avg_td_error > self.td_error_threshold:
@@ -404,6 +417,24 @@ class AdaptiveBetaAgent:
         max_val = np.max(self.q_beta)
         best_betas = np.flatnonzero(np.isclose(self.q_beta, max_val, rtol=1e-08, atol=1e-12))
         return int(self.rng.choice(best_betas))
+    
+    def _compute_uncertainty_based_beta(self) -> int:
+        """不確実性（TD誤差）に基づいてβ値を計算"""
+        if self.td_error_ma < self.uncertainty_threshold_low:
+            # 低不確実性: MF優先 (β = 0.2-0.4)
+            self.current_beta_value = 0.2 + 0.2 * (self.td_error_ma / self.uncertainty_threshold_low)
+        elif self.td_error_ma > self.uncertainty_threshold_high:
+            # 高不確実性: MB優先 (β = 0.6-1.0)
+            excess = min(self.td_error_ma - self.uncertainty_threshold_high, self.uncertainty_threshold_high)
+            self.current_beta_value = 0.6 + 0.4 * (excess / self.uncertainty_threshold_high)
+        else:
+            # 中間不確実性: 線形補間 (β = 0.4-0.6)
+            range_size = self.uncertainty_threshold_high - self.uncertainty_threshold_low
+            position = (self.td_error_ma - self.uncertainty_threshold_low) / range_size
+            self.current_beta_value = 0.4 + 0.2 * position
+        
+        self.current_beta_value = np.clip(self.current_beta_value, 0.0, 1.0)
+        return int(np.argmin(np.abs(BETA_VALUES - self.current_beta_value)))
     
     def select_action(self, state: int) -> int:
         self.current_beta_idx = self.select_beta()
@@ -428,6 +459,17 @@ class AdaptiveBetaAgent:
         self.recent_td_errors.append(td_error)
         if len(self.recent_td_errors) > self.td_error_window:
             self.recent_td_errors.pop(0)
+        
+        # 不確実性ベースβ適応用のTD誤差移動平均を更新
+        if self.use_uncertainty_beta:
+            abs_td_error = abs(td_error)
+            # td_error_historyを移動平均ウィンドウとして使用
+            if len(self.td_error_history) > self.td_window_size:
+                # 最古のものを削除（recent_td_errorsとは別管理）
+                recent_for_ma = self.td_error_history[-self.td_window_size:]
+                self.td_error_ma = np.mean(np.abs(recent_for_ma))
+            else:
+                self.td_error_ma = np.mean(np.abs(self.td_error_history))
         
         if self.fixed_beta is None and self.prev_beta_idx is not None:
             td_target_beta = reward + DISCOUNT * np.max(self.q_beta)
@@ -540,13 +582,17 @@ def run_single_agent(
     fixed_beta: Optional[float],
     volatility_interval: int,
     num_steps: int,
-    seed: int
+    seed: int,
+    uncertainty_based_beta: bool = False
 ) -> AgentPerformance:
     """Run a single agent and collect performance metrics"""
     
     rng = np.random.default_rng(seed)
     env = VolatileAddictionEnvironment(rng, volatility_interval)
-    agent = AdaptiveBetaAgent(rng, fixed_beta=fixed_beta)
+    
+    # Use uncertainty-based beta for adaptive agents
+    use_uncertainty = (beta_type == 'adaptive' and uncertainty_based_beta)
+    agent = AdaptiveBetaAgent(rng, fixed_beta=fixed_beta, use_uncertainty_beta=use_uncertainty)
     
     state = env.reset()
     rewards = []
@@ -618,7 +664,8 @@ def run_experiment_condition(
     volatility_interval: int,
     num_agents: int,
     num_steps: int,
-    base_seed: int
+    base_seed: int,
+    uncertainty_based_beta: bool = False
 ) -> ExperimentCondition:
     """Run full experiment for one condition"""
     
@@ -640,7 +687,8 @@ def run_experiment_condition(
             fixed_beta=fixed_beta,
             volatility_interval=volatility_interval,
             num_steps=num_steps,
-            seed=seed
+            seed=seed,
+            uncertainty_based_beta=uncertainty_based_beta
         )
         agent_performances.append(perf)
     
@@ -776,7 +824,8 @@ def run_large_scale_experiment(
             volatility_interval=vol_interval,
             num_agents=num_agents,
             num_steps=num_steps,
-            base_seed=base_seed + vol_interval * 10000
+            base_seed=base_seed + vol_interval * 10000,
+            uncertainty_based_beta=True  # 不確実性ベースのβ適応を有効化
         )
         all_conditions.append(cond)
         

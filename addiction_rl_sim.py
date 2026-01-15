@@ -114,8 +114,8 @@ AD_BACKWARD = [0.245, 0.245, 0.245]
 # reversal フェーズでは報酬が逆転: Drug=1.0(健康的), Goal=10.0(依存的)
 PHASES: Tuple[Tuple[str, int, float, float], ...] = (
     ("pre-drug", 50, 0.0, 1.0),      # Drug報酬=0, Goal報酬=1
-    ("addiction", 1000, 10.0, 1.0),   # Drug報酬=10, Goal報酬=1
-    ("reversal", 1000, 1.0, 10.0),    # Drug報酬=1, Goal報酬=10 (逆転)
+    ("addiction", 2500, 10.0, 1.0),   # Drug報酬=10, Goal報酬=1
+    ("reversal", 10000, 1.0, 10.0),    # Drug報酬=1, Goal報酬=10 (逆転)
 )
 
 # 報酬テーブルの事前構築

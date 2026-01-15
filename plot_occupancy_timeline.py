@@ -341,7 +341,7 @@ def main():
     # グラフ作成
     plot_multi_panel_occupancy(
         results_dir=results_dir,
-        beta_values=args.beta_values,
+        beta_values=beta_values,
         output_path=args.output,
         switch_step=args.switch_step,
         max_steps=args.max_steps

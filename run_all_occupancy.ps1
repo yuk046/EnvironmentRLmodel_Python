@@ -1,8 +1,8 @@
 # 全てのβ値でoccupancyデータを収集するスクリプト
 
 $beta_values = 0.0, 0.2, 0.4, 0.6, 0.8, 1.0
-$num_agents = 200
-$num_runs = 10
+$num_agents = 100
+$num_runs = 1
 
 Write-Host "======================================"
 Write-Host "Occupancy Data Collection"

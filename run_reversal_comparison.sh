@@ -5,6 +5,7 @@
 # Pythonパス設定（仮想環境使用）
 PYTHON="/Users/yukinari/EnvironmentRLmodel_Python/.venv/bin/python"
 
+
 NUM_AGENTS=900
 NUM_RUNS=1
 SEED=42

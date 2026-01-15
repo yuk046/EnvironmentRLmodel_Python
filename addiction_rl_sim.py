@@ -610,7 +610,9 @@ def simulate(
     debug_txt_path: Optional[str] = None,
     collect_beta_stats: bool = False,
     fixed_beta: Optional[float] = None,
-) -> Tuple[float, List[float], float, List[float], dict, Optional[BetaStatistics]]:
+    collect_occupancy_data: bool = False,
+    time_bin_size: int = 2000,
+) -> Tuple[float, List[float], float, List[float], dict, Optional[BetaStatistics], Optional[dict]]:
     """
     シミュレーションを実行する。
     
@@ -622,6 +624,7 @@ def simulate(
         - run_reversal_rates: 各ラン毎のreversal適応率
         - state_visit_stats: 状態訪問統計（フェーズ別）
         - beta_stats: β統計情報（収集した場合）
+        - occupancy_data: 時系列状態占有率データ（収集した場合）
     """
     addictions = 0
     reversal_adaptations = 0  # reversal適応したエージェント数
@@ -647,6 +650,24 @@ def simulate(
             num_agents=0
         )
     
+    # 時系列占有率データ収集用
+    occupancy_data = None
+    if collect_occupancy_data:
+        # 全フェーズの総ステップ数を計算
+        total_steps = sum(phase[1] for phase in PHASES)
+        # 必要なbin数を計算（切り上げ）
+        num_bins = (total_steps + time_bin_size - 1) // time_bin_size
+        # time_binsを正しく生成（num_bins + 1個の境界値）
+        time_bins = [i * time_bin_size for i in range(num_bins + 1)]
+        
+        occupancy_data = {
+            'time_bin_size': time_bin_size,
+            'num_bins': num_bins,
+            'total_steps': total_steps,
+            'time_bins': time_bins,
+            'runs': []  # 各runのデータを保存
+        }
+    
     # テキストログファイルを開く (追記モードではなく新規作成)
     log_file = None
     if debug_episode and debug_txt_path:
@@ -654,6 +675,11 @@ def simulate(
 
     try:
         for seed_idx in range(num_runs):
+            # この run の時系列データ（全エージェント）
+            if collect_occupancy_data:
+                run_occupancy = {
+                    'agents': []  # 各エージェントの状態訪問履歴
+                }
             print(f"\n[Run {seed_idx + 1}/{num_runs}] Starting...")
             for agent_idx in range(num_agents):
                 # 100体ごとに進捗表示
@@ -679,6 +705,9 @@ def simulate(
                 agent_beta_history = [] if collect_beta_stats else None
                 agent_state_history = [] if collect_beta_stats else None
                 agent_phase_history = [] if collect_beta_stats else None
+                
+                # 各エージェントの状態訪問履歴（occupancy data収集用）
+                agent_state_sequence = [] if collect_occupancy_data else None
                 
                 # フェーズ実行
                 for phase_idx, (_, length, _, _) in enumerate(PHASES):
@@ -706,9 +735,14 @@ def simulate(
                             agent_beta_history.append(selected_beta)
                             agent_state_history.append(state)
                             agent_phase_history.append(phase_idx)
-                            # step_historyは最初のエージェントのみ記録（全エージェント共通）
-                            if seed_idx == 0 and agent_idx == 0:
-                                beta_stats.step_history.append(global_step)
+                        
+                        # 状態訪問履歴を記録（occupancy data収集用）
+                        if collect_occupancy_data:
+                            agent_state_sequence.append(state)
+                        
+                        # step_historyはβ統計収集時のみ記録
+                        if collect_beta_stats and seed_idx == 0 and agent_idx == 0:
+                            beta_stats.step_history.append(global_step)
                         
                         # Debug出力用にβ値とQ値を取得
                         current_q_mf = None
@@ -847,6 +881,10 @@ def simulate(
                     beta_stats.phase_history_all.append(agent_phase_history)
                     beta_stats.addiction_status.append(is_addicted)
                     beta_stats.num_agents += 1
+                
+                # 状態訪問履歴を保存（occupancy data収集用）
+                if collect_occupancy_data:
+                    run_occupancy['agents'].append(agent_state_sequence)
 
                 if debug_episode and seed_idx == 0 and agent_idx == 0 and log_file:
                     log_file.write(f"Final Counts - Drug Choices: {counts.drug_choices}, Healthy Choices: {counts.healthy_choices}\n")
@@ -857,6 +895,10 @@ def simulate(
             run_addiction_rate = run_addictions[seed_idx] / num_agents * 100
             run_reversal_rate = run_reversal_adaptations[seed_idx] / num_agents * 100
             print(f"  [Run {seed_idx + 1}/{num_runs}] Completed! Addiction rate: {run_addiction_rate:.2f}%, Reversal adaptation rate: {run_reversal_rate:.2f}%")
+            
+            # このrunのoccupancy dataを集計
+            if collect_occupancy_data:
+                occupancy_data['runs'].append(run_occupancy)
     finally:
         if log_file:
             log_file.close()
@@ -905,7 +947,47 @@ def simulate(
         "reversal_total_steps": int(reversal_total_steps),
     }
     
-    return overall_rate, run_rates, overall_reversal_rate, run_reversal_rates, state_visit_stats, beta_stats
+    # occupancy dataを時間区間ごとに集計
+    if collect_occupancy_data:
+        # 全run、全エージェントのデータを統合して時間区間ごとの状態占有率を計算
+        num_bins = occupancy_data['num_bins']
+        total_steps = occupancy_data['total_steps']
+        
+        # 各状態について、各時間区間での占有率を計算（全run平均）
+        states_occupancy = {}
+        for state_id in range(NUM_STATES):
+            state_occupancy_by_run = []
+            
+            for run_data in occupancy_data['runs']:
+                # この run の全エージェントのデータを統合
+                bin_counts = np.zeros(num_bins)
+                bin_totals = np.zeros(num_bins)
+                
+                for agent_sequence in run_data['agents']:
+                    for step, state in enumerate(agent_sequence):
+                        if step >= total_steps:
+                            break
+                        bin_idx = min(step // time_bin_size, num_bins - 1)
+                        bin_totals[bin_idx] += 1
+                        if state == state_id:
+                            bin_counts[bin_idx] += 1
+                
+                # この run での各区間の占有率を計算
+                run_occupancy = np.zeros(num_bins)
+                for bin_idx in range(num_bins):
+                    if bin_totals[bin_idx] > 0:
+                        run_occupancy[bin_idx] = bin_counts[bin_idx] / bin_totals[bin_idx]
+                
+                state_occupancy_by_run.append(run_occupancy.tolist())
+            
+            states_occupancy[str(state_id)] = state_occupancy_by_run
+        
+        # occupancy dataに集計結果を追加
+        occupancy_data['states'] = states_occupancy
+        # runs（生データ）は容量が大きいので削除
+        del occupancy_data['runs']
+    
+    return overall_rate, run_rates, overall_reversal_rate, run_reversal_rates, state_visit_stats, beta_stats, occupancy_data
 
 
 
@@ -1686,6 +1768,23 @@ def main():
         choices=[0.0, 0.2, 0.4, 0.6, 0.8, 1.0],
         help="Fix beta to a specific value instead of learning (choices: 0.0, 0.2, 0.4, 0.6, 0.8, 1.0)",
     )
+    parser.add_argument(
+        "--save-occupancy-data",
+        action="store_true",
+        help="Collect and save time-series state occupancy data",
+    )
+    parser.add_argument(
+        "--occupancy-output",
+        type=str,
+        default=None,
+        help="Output file for occupancy data (JSON format, default: beta_X_episodes.json)",
+    )
+    parser.add_argument(
+        "--time-bin-size",
+        type=int,
+        default=2000,
+        help="Time bin size for occupancy data aggregation (default: 2000)",
+    )
     args = parser.parse_args()
 
     print(f"Simulation Start: Agents={args.num_agents}, Runs={args.num_runs}, Seed={args.seed}")
@@ -1706,7 +1805,7 @@ def main():
     if args.debug_episode:
         debug_txt_path = "debug_log_learn_beta.txt"
 
-    overall_rate, run_rates, overall_reversal_rate, run_reversal_rates, state_visit_stats, beta_stats = simulate(
+    overall_rate, run_rates, overall_reversal_rate, run_reversal_rates, state_visit_stats, beta_stats, occupancy_data = simulate(
         args.num_agents,
         args.num_runs,
         args.seed,
@@ -1717,6 +1816,8 @@ def main():
         debug_txt_path=debug_txt_path,
         collect_beta_stats=args.plot_beta,
         fixed_beta=args.fixed_beta,
+        collect_occupancy_data=args.save_occupancy_data,
+        time_bin_size=args.time_bin_size,
     )
     
     mean_addiction_percent = np.mean(run_rates) * 100.0
@@ -1746,6 +1847,33 @@ def main():
         with open(args.output, 'w') as f:
             json.dump(output_data, f, indent=2)
         print(f"Results saved to {args.output}")
+        
+        # occupancy dataも別ファイルに保存
+        if args.save_occupancy_data and occupancy_data is not None:
+            if args.occupancy_output:
+                occupancy_output_path = args.occupancy_output
+            else:
+                # デフォルトのファイル名を生成
+                if args.fixed_beta is not None:
+                    beta_str = f"{args.fixed_beta:.1f}" if args.fixed_beta != int(args.fixed_beta) else str(int(args.fixed_beta))
+                    occupancy_output_path = f"beta_{beta_str}_episodes.json"
+                else:
+                    occupancy_output_path = "beta_learning_episodes.json"
+            
+            occupancy_output_data = {
+                "beta": args.fixed_beta,
+                "beta_mode": "fixed" if args.fixed_beta is not None else "learning",
+                "n_runs": args.num_runs,
+                "time_bins": occupancy_data['time_bins'],
+                "time_bin_size": occupancy_data['time_bin_size'],
+                "total_steps": occupancy_data['total_steps'],
+                "states": occupancy_data['states']
+            }
+            
+            with open(occupancy_output_path, 'w') as f:
+                json.dump(occupancy_output_data, f, indent=2)
+            print(f"Occupancy data saved to {occupancy_output_path}")
+        
         return
 
     # 簡易統計表示

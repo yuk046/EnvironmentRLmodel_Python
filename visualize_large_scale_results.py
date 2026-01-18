@@ -33,7 +33,7 @@ plt.rcParams['xtick.major.width'] = 1.5
 plt.rcParams['ytick.major.width'] = 1.5
 
 
-def plot_main_results(conditions, comparisons, output_dir):
+def plot_main_results(conditions, comparisons, output_dir, num_steps=8000):
     """Main publication figure: Performance comparison across conditions"""
     
     volatility_intervals = sorted(list(set(c.volatility_interval for c in conditions)))
@@ -113,7 +113,7 @@ def plot_main_results(conditions, comparisons, output_dir):
         # Formatting
         ax.set_xticks(x_pos)
         ax.set_xticklabels(labels, rotation=45, ha='right', fontsize=9)
-        ax.set_ylabel('Total Reward (2000 steps)', fontsize=11, fontweight='bold')
+        ax.set_ylabel(f'Total Reward ({num_steps} steps)', fontsize=11, fontweight='bold')
         ax.set_title(f'Volatility Interval: {vol_interval} steps', 
                     fontsize=12, fontweight='bold')
         ax.grid(True, alpha=0.3, axis='y')
@@ -132,9 +132,7 @@ def plot_main_results(conditions, comparisons, output_dir):
     
     plt.savefig(f'{output_dir}/figure1_main_performance.png', 
                 bbox_inches='tight', dpi=300)
-    plt.savefig(f'{output_dir}/figure1_main_performance.pdf', 
-                bbox_inches='tight')
-    print(f"Saved: {output_dir}/figure1_main_performance.png/pdf")
+    print(f"Saved: {output_dir}/figure1_main_performance.png")
     plt.close()
 
 
@@ -195,9 +193,7 @@ def plot_learning_curves(conditions, output_dir):
     plt.tight_layout()
     plt.savefig(f'{output_dir}/figure2_learning_curves.png', 
                 bbox_inches='tight', dpi=300)
-    plt.savefig(f'{output_dir}/figure2_learning_curves.pdf', 
-                bbox_inches='tight')
-    print(f"Saved: {output_dir}/figure2_learning_curves.png/pdf")
+    print(f"Saved: {output_dir}/figure2_learning_curves.png")
     plt.close()
 
 
@@ -272,9 +268,7 @@ def plot_effect_sizes(comparisons, output_dir):
     plt.tight_layout()
     plt.savefig(f'{output_dir}/figure3_effect_sizes.png', 
                 bbox_inches='tight', dpi=300)
-    plt.savefig(f'{output_dir}/figure3_effect_sizes.pdf', 
-                bbox_inches='tight')
-    print(f"Saved: {output_dir}/figure3_effect_sizes.png/pdf")
+    print(f"Saved: {output_dir}/figure3_effect_sizes.png")
     plt.close()
 
 
@@ -355,9 +349,257 @@ def plot_recovery_analysis(conditions, output_dir):
     plt.tight_layout()
     plt.savefig(f'{output_dir}/figure4_recovery_analysis.png',
                 bbox_inches='tight', dpi=300)
-    plt.savefig(f'{output_dir}/figure4_recovery_analysis.pdf',
-                bbox_inches='tight')
-    print(f"Saved: {output_dir}/figure4_recovery_analysis.png/pdf")
+    print(f"Saved: {output_dir}/figure4_recovery_analysis.png")
+    plt.close()
+
+
+def plot_phase3_performance(conditions, comparisons, output_dir):
+    """Plot performance for phase 3 (3rd environment window) only"""
+    
+    volatility_intervals = sorted(list(set(c.volatility_interval for c in conditions)))
+    
+    fig = plt.figure(figsize=(14, 10))
+    gs = GridSpec(2, 2, figure=fig, hspace=0.3, wspace=0.3)
+    
+    for idx, vol_interval in enumerate(volatility_intervals):
+        ax = fig.add_subplot(gs[idx // 2, idx % 2])
+        
+        # Get conditions for this volatility interval
+        conds = [c for c in conditions if c.volatility_interval == vol_interval]
+        
+        # Extract phase 3 (window index 2) rewards
+        phase3_data = []
+        labels = []
+        colors = []
+        
+        for cond in conds:
+            # Collect phase 3 rewards from all agents
+            phase3_rewards = []
+            for perf in cond.agent_performances:
+                if len(perf.rewards_per_window) > 2:  # Ensure phase 3 exists
+                    phase3_rewards.append(perf.rewards_per_window[2])
+            
+            if not phase3_rewards:
+                continue
+            
+            phase3_data.append({
+                'mean': np.mean(phase3_rewards),
+                'sem': stats.sem(phase3_rewards),
+                'cond': cond
+            })
+        
+        # Sort by mean performance
+        phase3_data.sort(key=lambda x: x['mean'], reverse=True)
+        
+        # Prepare plot data
+        means = [d['mean'] for d in phase3_data]
+        sems = [d['sem'] for d in phase3_data]
+        
+        for d in phase3_data:
+            cond = d['cond']
+            if cond.beta_type == "adaptive":
+                labels.append("Adaptive β")
+                colors.append("#2ecc71")
+            else:
+                labels.append(f"β={cond.fixed_beta:.1f}")
+                if cond.fixed_beta == 0.0:
+                    colors.append("#e74c3c")
+                elif cond.fixed_beta == 1.0:
+                    colors.append("#3498db")
+                else:
+                    colors.append("#95a5a6")
+        
+        # Plot bars
+        x_pos = np.arange(len(labels))
+        bars = ax.bar(x_pos, means, yerr=sems, capsize=5, 
+                     color=colors, edgecolor='black', linewidth=1.5, alpha=0.8)
+        
+        # Add significance stars (comparing to adaptive)
+        adaptive_idx = next((i for i, d in enumerate(phase3_data) 
+                            if d['cond'].beta_type == "adaptive"), None)
+        
+        if adaptive_idx is not None:
+            adaptive_cond = phase3_data[adaptive_idx]['cond']
+            for i, d in enumerate(phase3_data):
+                if d['cond'].beta_type != "adaptive":
+                    # Find comparison
+                    comp = next((c for c in comparisons 
+                               if c.condition_a == adaptive_cond.condition_name 
+                               and c.condition_b == d['cond'].condition_name), None)
+                    
+                    if comp:
+                        y_pos = max(means[adaptive_idx], means[i]) + max(sems[adaptive_idx], sems[i]) + 0.5
+                        
+                        if comp.p_value < 0.001:
+                            sig_text = "***"
+                        elif comp.p_value < 0.01:
+                            sig_text = "**"
+                        elif comp.p_value < 0.05:
+                            sig_text = "*"
+                        else:
+                            sig_text = "n.s."
+                        
+                        if sig_text != "n.s.":
+                            ax.plot([adaptive_idx, i], [y_pos, y_pos], 'k-', linewidth=1)
+                            ax.text((adaptive_idx + i) / 2, y_pos + 0.1, sig_text,
+                                   ha='center', va='bottom', fontweight='bold', fontsize=12)
+        
+        # Highlight best performer
+        bars[0].set_edgecolor('gold')
+        bars[0].set_linewidth(3)
+        
+        # Formatting
+        ax.set_xticks(x_pos)
+        ax.set_xticklabels(labels, rotation=45, ha='right', fontsize=9)
+        ax.set_ylabel('Phase 3 Reward', fontsize=11, fontweight='bold')
+        ax.set_title(f'Phase 3 Performance\nVolatility Interval: {vol_interval} steps', 
+                    fontsize=12, fontweight='bold')
+        ax.grid(True, alpha=0.3, axis='y')
+        ax.axhline(y=0, color='black', linestyle='--', linewidth=0.5, alpha=0.5)
+        
+        # Add sample size
+        if phase3_data:
+            n = len([p for p in phase3_data[0]['cond'].agent_performances 
+                    if len(p.rewards_per_window) > 2])
+            ax.text(0.02, 0.98, f'n={n} agents\n(3rd env. window)', 
+                   transform=ax.transAxes, fontsize=9, va='top',
+                   bbox=dict(boxstyle='round', facecolor='wheat', alpha=0.5))
+    
+    # Legend for significance
+    fig.text(0.5, 0.02, '*** p<0.001, ** p<0.01, * p<0.05, n.s. not significant\n'
+                        'Error bars: SEM (Standard Error of Mean)\n'
+                        'Phase 3: Rewards in the 3rd environment change window',
+             ha='center', fontsize=9, style='italic')
+    
+    plt.savefig(f'{output_dir}/figure5_phase3_performance.png', 
+                bbox_inches='tight', dpi=300)
+    print(f"Saved: {output_dir}/figure5_phase3_performance.png")
+    plt.close()
+
+
+def plot_phase3_total_reward(conditions, comparisons, output_dir):
+    """Plot total reward for phase 3 (3rd environment window) only"""
+    
+    volatility_intervals = sorted(list(set(c.volatility_interval for c in conditions)))
+    
+    fig = plt.figure(figsize=(14, 10))
+    gs = GridSpec(2, 2, figure=fig, hspace=0.3, wspace=0.3)
+    
+    for idx, vol_interval in enumerate(volatility_intervals):
+        ax = fig.add_subplot(gs[idx // 2, idx % 2])
+        
+        # Get conditions for this volatility interval
+        conds = [c for c in conditions if c.volatility_interval == vol_interval]
+        
+        # Extract phase 3 total rewards
+        phase3_data = []
+        
+        for cond in conds:
+            # Collect phase 3 total rewards from all agents
+            phase3_total_rewards = []
+            for perf in cond.agent_performances:
+                # Use post_change_rewards[2] if available (3rd environment change)
+                if len(perf.post_change_rewards) > 2 and len(perf.post_change_rewards[2]) > 0:
+                    total_reward = sum(perf.post_change_rewards[2])
+                    phase3_total_rewards.append(total_reward)
+            
+            if not phase3_total_rewards:
+                continue
+            
+            phase3_data.append({
+                'mean': np.mean(phase3_total_rewards),
+                'sem': stats.sem(phase3_total_rewards),
+                'cond': cond
+            })
+        
+        # Sort by mean performance
+        phase3_data.sort(key=lambda x: x['mean'], reverse=True)
+        
+        # Prepare plot data
+        means = [d['mean'] for d in phase3_data]
+        sems = [d['sem'] for d in phase3_data]
+        labels = []
+        colors = []
+        
+        for d in phase3_data:
+            cond = d['cond']
+            if cond.beta_type == "adaptive":
+                labels.append("Adaptive β")
+                colors.append("#2ecc71")
+            else:
+                labels.append(f"β={cond.fixed_beta:.1f}")
+                if cond.fixed_beta == 0.0:
+                    colors.append("#e74c3c")
+                elif cond.fixed_beta == 1.0:
+                    colors.append("#3498db")
+                else:
+                    colors.append("#95a5a6")
+        
+        # Plot bars
+        x_pos = np.arange(len(labels))
+        bars = ax.bar(x_pos, means, yerr=sems, capsize=5, 
+                     color=colors, edgecolor='black', linewidth=1.5, alpha=0.8)
+        
+        # Add significance stars (comparing to adaptive)
+        adaptive_idx = next((i for i, d in enumerate(phase3_data) 
+                            if d['cond'].beta_type == "adaptive"), None)
+        
+        if adaptive_idx is not None:
+            adaptive_cond = phase3_data[adaptive_idx]['cond']
+            for i, d in enumerate(phase3_data):
+                if d['cond'].beta_type != "adaptive":
+                    # Find comparison
+                    comp = next((c for c in comparisons 
+                               if c.condition_a == adaptive_cond.condition_name 
+                               and c.condition_b == d['cond'].condition_name), None)
+                    
+                    if comp:
+                        y_pos = max(means[adaptive_idx], means[i]) + max(sems[adaptive_idx], sems[i]) + 10
+                        
+                        if comp.p_value < 0.001:
+                            sig_text = "***"
+                        elif comp.p_value < 0.01:
+                            sig_text = "**"
+                        elif comp.p_value < 0.05:
+                            sig_text = "*"
+                        else:
+                            sig_text = "n.s."
+                        
+                        if sig_text != "n.s.":
+                            ax.plot([adaptive_idx, i], [y_pos, y_pos], 'k-', linewidth=1)
+                            ax.text((adaptive_idx + i) / 2, y_pos + 2, sig_text,
+                                   ha='center', va='bottom', fontweight='bold', fontsize=12)
+        
+        # Highlight best performer
+        bars[0].set_edgecolor('gold')
+        bars[0].set_linewidth(3)
+        
+        # Formatting
+        ax.set_xticks(x_pos)
+        ax.set_xticklabels(labels, rotation=45, ha='right', fontsize=9)
+        ax.set_ylabel('Phase 3 Total Reward', fontsize=11, fontweight='bold')
+        ax.set_title(f'Phase 3 Total Reward\nVolatility Interval: {vol_interval} steps', 
+                    fontsize=12, fontweight='bold')
+        ax.grid(True, alpha=0.3, axis='y')
+        ax.axhline(y=0, color='black', linestyle='--', linewidth=0.5, alpha=0.5)
+        
+        # Add sample size
+        if phase3_data:
+            n = len([p for p in phase3_data[0]['cond'].agent_performances 
+                    if len(p.post_change_rewards) > 2 and len(p.post_change_rewards[2]) > 0])
+            ax.text(0.02, 0.98, f'n={n} agents\n(3rd env. window)', 
+                   transform=ax.transAxes, fontsize=9, va='top',
+                   bbox=dict(boxstyle='round', facecolor='wheat', alpha=0.5))
+    
+    # Legend for significance
+    fig.text(0.5, 0.02, '*** p<0.001, ** p<0.01, * p<0.05, n.s. not significant\n'
+                        'Error bars: SEM (Standard Error of Mean)\n'
+                        'Phase 3: Total cumulative reward in the 3rd environment change window',
+             ha='center', fontsize=9, style='italic')
+    
+    plt.savefig(f'{output_dir}/figure6_phase3_total_reward.png', 
+                bbox_inches='tight', dpi=300)
+    print(f"Saved: {output_dir}/figure6_phase3_total_reward.png")
     plt.close()
 
 
@@ -454,10 +696,13 @@ def main():
     
     # Generate all figures
     print("\nGenerating figures...")
-    plot_main_results(conditions, comparisons, args.output_dir)
+    num_steps = params.get('num_steps', 8000)
+    plot_main_results(conditions, comparisons, args.output_dir, num_steps)
     plot_learning_curves(conditions, args.output_dir)
     plot_effect_sizes(comparisons, args.output_dir)
     plot_recovery_analysis(conditions, args.output_dir)
+    plot_phase3_performance(conditions, comparisons, args.output_dir)
+    plot_phase3_total_reward(conditions, comparisons, args.output_dir)
     
     print("\nCreating summary table...")
     create_summary_table(conditions, comparisons, args.output_dir)
@@ -466,10 +711,12 @@ def main():
     print("VISUALIZATION COMPLETE")
     print("="*70)
     print(f"\nGenerated files in {args.output_dir}:")
-    print("  - figure1_main_performance.png/pdf")
-    print("  - figure2_learning_curves.png/pdf")
-    print("  - figure3_effect_sizes.png/pdf")
-    print("  - figure4_recovery_analysis.png/pdf")
+    print("  - figure1_main_performance.png")
+    print("  - figure2_learning_curves.png")
+    print("  - figure3_effect_sizes.png")
+    print("  - figure4_recovery_analysis.png")
+    print("  - figure5_phase3_performance.png")
+    print("  - figure6_phase3_total_reward.png")
     print("  - table1_summary.tex")
 
 

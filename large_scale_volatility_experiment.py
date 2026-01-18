@@ -665,32 +665,36 @@ def run_experiment_condition(
     num_agents: int,
     num_steps: int,
     base_seed: int,
+    num_runs: int = 1,
     uncertainty_based_beta: bool = False
 ) -> ExperimentCondition:
     """Run full experiment for one condition"""
     
     print(f"\nRunning: {condition_name}")
-    print(f"  Beta: {beta_type}, Volatility: {volatility_interval}, Agents: {num_agents}")
+    print(f"  Beta: {beta_type}, Volatility: {volatility_interval}, Agents: {num_agents}, Runs: {num_runs}")
     
     start_time = time.time()
     agent_performances = []
     
-    for i in range(num_agents):
-        if (i + 1) % 50 == 0:
-            elapsed = time.time() - start_time
-            print(f"    Agent {i+1}/{num_agents} ({elapsed:.1f}s)")
-        
-        seed = base_seed + i
-        perf = run_single_agent(
-            agent_id=i,
-            beta_type=beta_type,
-            fixed_beta=fixed_beta,
-            volatility_interval=volatility_interval,
-            num_steps=num_steps,
-            seed=seed,
-            uncertainty_based_beta=uncertainty_based_beta
-        )
-        agent_performances.append(perf)
+    for run in range(num_runs):
+        run_seed_offset = run * 100000
+        for i in range(num_agents):
+            agent_idx = run * num_agents + i
+            if (agent_idx + 1) % 50 == 0:
+                elapsed = time.time() - start_time
+                print(f"    Run {run+1}/{num_runs}, Agent {i+1}/{num_agents} (Total: {agent_idx+1}/{num_agents*num_runs}, {elapsed:.1f}s)")
+            
+            seed = base_seed + run_seed_offset + i
+            perf = run_single_agent(
+                agent_id=agent_idx,
+                beta_type=beta_type,
+                fixed_beta=fixed_beta,
+                volatility_interval=volatility_interval,
+                num_steps=num_steps,
+                seed=seed,
+                uncertainty_based_beta=uncertainty_based_beta
+            )
+            agent_performances.append(perf)
     
     # Aggregate statistics
     total_rewards = [p.total_reward for p in agent_performances]
@@ -700,6 +704,8 @@ def run_experiment_condition(
     ci_95 = stats.t.interval(0.95, len(total_rewards)-1, loc=mean_total, scale=sem_total)
     
     reward_per_steps = [p.avg_reward_per_step for p in agent_performances]
+    
+    actual_num_agents = len(agent_performances)
     
     # Window-level aggregation
     max_windows = max(len(p.rewards_per_window) for p in agent_performances)
@@ -729,7 +735,7 @@ def run_experiment_condition(
         volatility_interval=volatility_interval,
         beta_type=beta_type,
         fixed_beta=fixed_beta,
-        num_agents=num_agents,
+        num_agents=actual_num_agents,
         mean_total_reward=mean_total,
         std_total_reward=std_total,
         sem_total_reward=sem_total,
@@ -788,9 +794,10 @@ def compute_statistical_comparison(cond_a: ExperimentCondition,
 # ==========================================
 def run_large_scale_experiment(
     num_agents: int = 200,
-    num_steps: int = 2000,
+    num_steps: int = 8000,
     base_seed: int = 42,
-    volatility_intervals: List[int] = [50, 100, 200],
+    num_runs: int = 1,
+    volatility_intervals: List[int] = [200, 350, 500],
     output_dir: str = "large_scale_results"
 ):
     """Run comprehensive large-scale experiment"""
@@ -803,10 +810,12 @@ def run_large_scale_experiment(
     print("="*70)
     print(f"Agents per condition: {num_agents}")
     print(f"Steps per agent: {num_steps}")
+    print(f"Number of runs: {num_runs}")
     print(f"Volatility intervals: {volatility_intervals}")
     print(f"Fixed betas: {BETA_VALUES}")
     print(f"Total conditions: {len(volatility_intervals) * (len(BETA_VALUES) + 1)}")
-    print(f"Total agent runs: {num_agents * len(volatility_intervals) * (len(BETA_VALUES) + 1)}")
+    print(f"Total agent runs per run: {num_agents * len(volatility_intervals) * (len(BETA_VALUES) + 1)}")
+    print(f"Total agent runs (all runs): {num_agents * len(volatility_intervals) * (len(BETA_VALUES) + 1) * num_runs}")
     print("="*70)
     
     all_conditions = []
@@ -825,6 +834,7 @@ def run_large_scale_experiment(
             num_agents=num_agents,
             num_steps=num_steps,
             base_seed=base_seed + vol_interval * 10000,
+            num_runs=num_runs,
             uncertainty_based_beta=True  # 不確実性ベースのβ適応を有効化
         )
         all_conditions.append(cond)
@@ -838,7 +848,8 @@ def run_large_scale_experiment(
                 volatility_interval=vol_interval,
                 num_agents=num_agents,
                 num_steps=num_steps,
-                base_seed=base_seed + vol_interval * 10000 + int(beta_val * 1000)
+                base_seed=base_seed + vol_interval * 10000 + int(beta_val * 1000),
+                num_runs=num_runs
             )
             all_conditions.append(cond)
     
@@ -922,6 +933,7 @@ def run_large_scale_experiment(
             'parameters': {
                 'num_agents': num_agents,
                 'num_steps': num_steps,
+                'num_runs': num_runs,
                 'base_seed': base_seed,
                 'volatility_intervals': volatility_intervals
             }
@@ -937,9 +949,11 @@ def run_large_scale_experiment(
 def main():
     parser = argparse.ArgumentParser(description='Large-scale volatility experiment')
     parser.add_argument('--num-agents', type=int, default=200, 
-                       help='Number of agents per condition')
-    parser.add_argument('--num-steps', type=int, default=2000,
+                       help='Number of agents per condition per run')
+    parser.add_argument('--num-steps', type=int, default=8000,
                        help='Number of steps per agent')
+    parser.add_argument('--num-runs', type=int, default=1,
+                       help='Number of runs with different seeds')
     parser.add_argument('--seed', type=int, default=42,
                        help='Base random seed')
     parser.add_argument('--output-dir', type=str, default='large_scale_results',
@@ -952,8 +966,9 @@ def main():
     conditions, comparisons = run_large_scale_experiment(
         num_agents=args.num_agents,
         num_steps=args.num_steps,
+        num_runs=args.num_runs,
         base_seed=args.seed,
-        volatility_intervals=[50, 100, 200],
+        volatility_intervals=[200, 350, 500],
         output_dir=args.output_dir
     )
     

@@ -18,6 +18,7 @@ import json
 import pickle
 import math
 import time
+import gc
 from dataclasses import dataclass, field, asdict
 from typing import List, Tuple, Optional, Dict
 from concurrent.futures import ProcessPoolExecutor, as_completed
@@ -28,6 +29,29 @@ from scipy import stats
 from numba import jit
 import warnings
 warnings.filterwarnings('ignore')
+
+try:
+    import psutil
+    PSUTIL_AVAILABLE = True
+except ImportError:
+    PSUTIL_AVAILABLE = False
+    print("Warning: psutil not available. Memory monitoring disabled.")
+
+# ==========================================
+# Memory Monitoring
+# ==========================================
+def get_memory_usage():
+    """Get current memory usage in MB"""
+    if PSUTIL_AVAILABLE:
+        process = psutil.Process()
+        return process.memory_info().rss / 1024 / 1024
+    return 0
+
+def print_memory_status(prefix=""):
+    """Print current memory usage"""
+    if PSUTIL_AVAILABLE:
+        mem_mb = get_memory_usage()
+        print(f"{prefix}Memory usage: {mem_mb:.1f} MB")
 
 # ==========================================
 # Constants and Environment Setup
@@ -559,6 +583,7 @@ class ExperimentCondition:
     # Recovery statistics
     mean_recovery_speed: float
     std_recovery_speed: float
+    all_recovery_speeds: List[float] = field(default_factory=list)  # 全recovery_speedsのリスト
 
 
 @dataclass
@@ -584,7 +609,8 @@ def run_single_agent(
     volatility_interval: int,
     num_steps: int,
     seed: int,
-    uncertainty_based_beta: bool = False
+    uncertainty_based_beta: bool = False,
+    lightweight: bool = True
 ) -> AgentPerformance:
     """Run a single agent and collect performance metrics"""
     
@@ -633,29 +659,57 @@ def run_single_agent(
     # Calculate recovery speeds
     recovery_speeds = []
     for i, change_point in enumerate(env_change_points):
-        if change_point + 20 < num_steps:
+        # 最低でも10ステップ分のpost-changeデータがあればrecovery計算可能
+        if change_point + 10 < num_steps:
             pre_change = np.mean(rewards[max(0, change_point-10):change_point])
             post_10 = np.mean(rewards[change_point:change_point+10])
-            post_20 = np.mean(rewards[change_point+10:change_point+20])
+            
+            # 20ステップ分のデータがあれば使用、なければ残りのステップを使用
+            if change_point + 20 < num_steps:
+                post_20 = np.mean(rewards[change_point+10:change_point+20])
+            else:
+                # 残りのステップを使用
+                remaining_steps = num_steps - change_point - 10
+                if remaining_steps > 0:
+                    post_20 = np.mean(rewards[change_point+10:num_steps])
+                else:
+                    continue
             
             if abs(pre_change - post_10) > 0.01:
                 speed = (post_20 - post_10) / (abs(pre_change - post_10) + 0.01)
                 if -10 < speed < 10:  # Filter outliers
                     recovery_speeds.append(speed)
     
-    return AgentPerformance(
-        agent_id=agent_id,
-        beta_type=beta_type,
-        fixed_beta=fixed_beta,
-        total_reward=sum(rewards),
-        avg_reward_per_step=np.mean(rewards),
-        rewards_per_window=window_rewards,
-        td_errors=agent.td_error_history,
-        beta_history=agent.beta_history,
-        env_change_points=env_change_points,
-        recovery_speeds=recovery_speeds,
-        post_change_rewards=post_change_rewards
-    )
+    # 軽量モードでは履歴データを保存しない（メモリ節約）
+    # ただしrecovery_speedsは統計に重要なので保持
+    if lightweight:
+        return AgentPerformance(
+            agent_id=agent_id,
+            beta_type=beta_type,
+            fixed_beta=fixed_beta,
+            total_reward=sum(rewards),
+            avg_reward_per_step=np.mean(rewards),
+            rewards_per_window=window_rewards,
+            td_errors=[],  # 空リスト
+            beta_history=[],  # 空リスト
+            env_change_points=env_change_points,
+            recovery_speeds=recovery_speeds,  # 保持
+            post_change_rewards=[]  # 空リスト
+        )
+    else:
+        return AgentPerformance(
+            agent_id=agent_id,
+            beta_type=beta_type,
+            fixed_beta=fixed_beta,
+            total_reward=sum(rewards),
+            avg_reward_per_step=np.mean(rewards),
+            rewards_per_window=window_rewards,
+            td_errors=agent.td_error_history,
+            beta_history=agent.beta_history,
+            env_change_points=env_change_points,
+            recovery_speeds=recovery_speeds,
+            post_change_rewards=post_change_rewards
+        )
 
 
 def run_experiment_condition(
@@ -668,13 +722,17 @@ def run_experiment_condition(
     base_seed: int,
     num_runs: int = 1,
     uncertainty_based_beta: bool = False,
-    max_workers: int = None
+    max_workers: int = None,
+    batch_size: int = 100,
+    lightweight: bool = True
 ) -> ExperimentCondition:
-    """Run full experiment for one condition with parallel processing"""
+    """Run full experiment for one condition with memory-efficient batch processing"""
     
     print(f"\nRunning: {condition_name}")
     print(f"  Beta: {beta_type}, Volatility: {volatility_interval}, Agents: {num_agents}, Runs: {num_runs}")
-    print(f"  Parallel workers: {max_workers if max_workers else 'auto'}")
+    print(f"  Parallel workers: {max_workers if max_workers else 'auto'}, Batch size: {batch_size}")
+    print(f"  Lightweight mode: {lightweight}")
+    print_memory_status("  Initial ")
     
     start_time = time.time()
     
@@ -692,61 +750,87 @@ def run_experiment_condition(
                 volatility_interval,
                 num_steps,
                 seed,
-                uncertainty_based_beta
+                uncertainty_based_beta,
+                lightweight
             ))
     
-    # Execute tasks in parallel
-    agent_performances = []
+    # 集計用の変数（メモリ効率化のため段階的に集計）
+    total_rewards = []
+    reward_per_steps = []
+    all_recovery_speeds = []
+    window_rewards_accumulator = []
+    
     total_tasks = len(tasks)
     completed = 0
     
-    with ProcessPoolExecutor(max_workers=max_workers) as executor:
-        # Submit all tasks
-        future_to_task = {executor.submit(run_single_agent, *task): task for task in tasks}
+    # バッチ処理で実行
+    for batch_start in range(0, total_tasks, batch_size):
+        batch_end = min(batch_start + batch_size, total_tasks)
+        batch_tasks = tasks[batch_start:batch_end]
         
-        # Collect results as they complete
-        for future in as_completed(future_to_task):
-            perf = future.result()
-            agent_performances.append(perf)
-            completed += 1
+        print(f"  Processing batch {batch_start//batch_size + 1}/{(total_tasks + batch_size - 1)//batch_size}...")
+        
+        with ProcessPoolExecutor(max_workers=max_workers) as executor:
+            # Submit batch tasks
+            future_to_task = {executor.submit(run_single_agent, *task): task for task in batch_tasks}
             
-            if completed % 50 == 0 or completed == total_tasks:
-                elapsed = time.time() - start_time
-                print(f"    Progress: {completed}/{total_tasks} agents completed ({elapsed:.1f}s)")
+            # Collect results as they complete
+            for future in as_completed(future_to_task):
+                perf = future.result()
+                
+                # 即座に集計（メモリ節約）
+                total_rewards.append(perf.total_reward)
+                reward_per_steps.append(perf.avg_reward_per_step)
+                all_recovery_speeds.extend(perf.recovery_speeds)
+                window_rewards_accumulator.append(perf.rewards_per_window)
+                
+                completed += 1
+                
+                if completed % 50 == 0 or completed == total_tasks:
+                    elapsed = time.time() - start_time
+                    print(f"    Progress: {completed}/{total_tasks} agents completed ({elapsed:.1f}s)")
+                    print_memory_status("    ")
+        
+        # バッチ終了後にガベージコレクション
+        gc.collect()
     
-    # Aggregate statistics
-    total_rewards = [p.total_reward for p in agent_performances]
+    # Aggregate statistics from accumulated data
     mean_total = np.mean(total_rewards)
     std_total = np.std(total_rewards, ddof=1)
     sem_total = stats.sem(total_rewards)
     ci_95 = stats.t.interval(0.95, len(total_rewards)-1, loc=mean_total, scale=sem_total)
     
-    reward_per_steps = [p.avg_reward_per_step for p in agent_performances]
-    
-    actual_num_agents = len(agent_performances)
+    actual_num_agents = len(total_rewards)
     
     # Window-level aggregation
-    max_windows = max(len(p.rewards_per_window) for p in agent_performances)
+    max_windows = max(len(w) for w in window_rewards_accumulator) if window_rewards_accumulator else 0
     mean_rewards_per_window = []
     std_rewards_per_window = []
     
     for w in range(max_windows):
-        window_vals = [p.rewards_per_window[w] for p in agent_performances 
-                      if len(p.rewards_per_window) > w]
+        window_vals = [rewards[w] for rewards in window_rewards_accumulator 
+                      if len(rewards) > w]
         if window_vals:
             mean_rewards_per_window.append(np.mean(window_vals))
             std_rewards_per_window.append(np.std(window_vals, ddof=1))
     
     # Recovery statistics
-    all_recovery_speeds = []
-    for p in agent_performances:
-        all_recovery_speeds.extend(p.recovery_speeds)
-    
     mean_recovery = np.mean(all_recovery_speeds) if all_recovery_speeds else 0
     std_recovery = np.std(all_recovery_speeds, ddof=1) if len(all_recovery_speeds) > 1 else 0
     
     elapsed = time.time() - start_time
     print(f"  Completed in {elapsed:.1f}s | Mean reward: {mean_total:.2f} ± {sem_total:.2f}")
+    print_memory_status("  Final ")
+    
+    # 注意: agent_performancesはrecovery分析等で必要なので、軽量モードでも保持
+    # （ただし各AgentPerformanceの履歴データは空にしてメモリ節約）
+    # agent_performancesはバッチ処理中に構築されていないので、ここで再構築する必要がある
+    # しかし、既にデータを集計してしまっているので、空リストのままにする
+    # visualization側で対処する
+    agent_performances = [] if lightweight else None
+    
+    # ガベージコレクション
+    gc.collect()
     
     return ExperimentCondition(
         condition_name=condition_name,
@@ -765,14 +849,59 @@ def run_experiment_condition(
         mean_rewards_per_window=mean_rewards_per_window,
         std_rewards_per_window=std_rewards_per_window,
         mean_recovery_speed=mean_recovery,
-        std_recovery_speed=std_recovery
+        std_recovery_speed=std_recovery,
+        all_recovery_speeds=all_recovery_speeds  # visualization用に保存
     )
 
 
 def compute_statistical_comparison(cond_a: ExperimentCondition, 
-                                   cond_b: ExperimentCondition) -> StatisticalComparison:
+                                   cond_b: ExperimentCondition,
+                                   use_summary_stats: bool = True) -> StatisticalComparison:
     """Compute statistical comparison between two conditions"""
     
+    # 軽量モードの場合は、要約統計量から近似計算
+    if use_summary_stats or not cond_a.agent_performances:
+        # 要約統計量を使用した近似t検定
+        n_a = cond_a.num_agents
+        n_b = cond_b.num_agents
+        mean_a = cond_a.mean_total_reward
+        mean_b = cond_b.mean_total_reward
+        std_a = cond_a.std_total_reward
+        std_b = cond_b.std_total_reward
+        
+        # Pooled standard deviation
+        pooled_std = np.sqrt(((n_a-1)*std_a**2 + (n_b-1)*std_b**2) / (n_a + n_b - 2))
+        
+        # t-statistic
+        se_diff = pooled_std * np.sqrt(1/n_a + 1/n_b)
+        t_stat = (mean_a - mean_b) / se_diff
+        
+        # p-value
+        df = n_a + n_b - 2
+        p_val = 2 * (1 - stats.t.cdf(abs(t_stat), df))
+        
+        # Cohen's d
+        cohens_d = (mean_a - mean_b) / pooled_std
+        
+        # Mean difference
+        mean_diff = mean_a - mean_b
+        
+        # 95% CI for difference
+        t_crit = stats.t.ppf(0.975, df)
+        ci_diff = (mean_diff - t_crit * se_diff, mean_diff + t_crit * se_diff)
+        
+        return StatisticalComparison(
+            condition_a=cond_a.condition_name,
+            condition_b=cond_b.condition_name,
+            t_statistic=t_stat,
+            p_value=p_val,
+            cohens_d=cohens_d,
+            mean_difference=mean_diff,
+            ci_95_difference=ci_diff,
+            significant=(p_val < 0.05)
+        )
+    
+    # 詳細データがある場合は従来の方法
     rewards_a = [p.total_reward for p in cond_a.agent_performances]
     rewards_b = [p.total_reward for p in cond_b.agent_performances]
     
@@ -817,9 +946,11 @@ def run_large_scale_experiment(
     num_runs: int = 1,
     volatility_intervals: List[int] = [200, 500, 1000],
     output_dir: str = "large_scale_results",
-    max_workers: int = None
+    max_workers: int = None,
+    batch_size: int = 100,
+    lightweight: bool = True
 ):
-    """Run comprehensive large-scale experiment with parallel processing"""
+    """Run comprehensive large-scale experiment with memory-efficient processing"""
     
     import os
     os.makedirs(output_dir, exist_ok=True)
@@ -835,6 +966,9 @@ def run_large_scale_experiment(
     print(f"Total conditions: {len(volatility_intervals) * (len(BETA_VALUES) + 1)}")
     print(f"Total agent runs per run: {num_agents * len(volatility_intervals) * (len(BETA_VALUES) + 1)}")
     print(f"Total agent runs (all runs): {num_agents * len(volatility_intervals) * (len(BETA_VALUES) + 1) * num_runs}")
+    print(f"Batch size: {batch_size}")
+    print(f"Lightweight mode: {lightweight}")
+    print_memory_status("Initial ")
     print("="*70)
     
     all_conditions = []
@@ -855,9 +989,12 @@ def run_large_scale_experiment(
             base_seed=base_seed + vol_interval * 10000,
             num_runs=num_runs,
             uncertainty_based_beta=True,  # 不確実性ベースのβ適応を有効化
-            max_workers=max_workers
+            max_workers=max_workers,
+            batch_size=batch_size,
+            lightweight=lightweight
         )
         all_conditions.append(cond)
+        gc.collect()  # 条件間でガベージコレクション
         
         # Run all fixed betas
         for beta_val in BETA_VALUES:
@@ -870,9 +1007,12 @@ def run_large_scale_experiment(
                 num_steps=num_steps,
                 base_seed=base_seed + vol_interval * 10000 + int(beta_val * 1000),
                 num_runs=num_runs,
-                max_workers=max_workers
+                max_workers=max_workers,
+                batch_size=batch_size,
+                lightweight=lightweight
             )
             all_conditions.append(cond)
+            gc.collect()  # 条件間でガベージコレクション
     
     # Statistical comparisons
     print(f"\n{'='*70}")
@@ -981,6 +1121,10 @@ def main():
                        help='Output directory')
     parser.add_argument('--max-workers', type=int, default=None,
                        help='Maximum number of parallel workers (default: CPU count)')
+    parser.add_argument('--batch-size', type=int, default=100,
+                       help='Number of agents to process in each batch (default: 100)')
+    parser.add_argument('--no-lightweight', action='store_true',
+                       help='Disable lightweight mode (saves full agent histories)')
     
     args = parser.parse_args()
     
@@ -991,9 +1135,11 @@ def main():
         num_steps=args.num_steps,
         num_runs=args.num_runs,
         base_seed=args.seed,
-        volatility_intervals=[200, 500, 1000],
+        volatility_intervals=[200, 1000, 500],
         output_dir=args.output_dir,
-        max_workers=args.max_workers
+        max_workers=args.max_workers,
+        batch_size=args.batch_size,
+        lightweight=not args.no_lightweight
     )
     
     elapsed = time.time() - start_time

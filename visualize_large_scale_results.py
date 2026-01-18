@@ -295,8 +295,14 @@ def plot_recovery_analysis(conditions, output_dir):
         # Adaptive beta
         adaptive = next(c for c in conds if c.beta_type == "adaptive")
         all_speeds = []
-        for perf in adaptive.agent_performances:
-            all_speeds.extend(perf.recovery_speeds)
+        
+        # 軽量モードの場合はall_recovery_speedsから取得
+        if hasattr(adaptive, 'all_recovery_speeds') and adaptive.all_recovery_speeds:
+            all_speeds = adaptive.all_recovery_speeds
+        elif adaptive.agent_performances:
+            for perf in adaptive.agent_performances:
+                all_speeds.extend(perf.recovery_speeds)
+        
         if all_speeds:
             data_to_plot.append(all_speeds)
             labels.append('Adaptive β')
@@ -310,8 +316,14 @@ def plot_recovery_analysis(conditions, output_dir):
             if fixed is None:
                 continue
             all_speeds = []
-            for perf in fixed.agent_performances:
-                all_speeds.extend(perf.recovery_speeds)
+            
+            # 軽量モードの場合はall_recovery_speedsから取得
+            if hasattr(fixed, 'all_recovery_speeds') and fixed.all_recovery_speeds:
+                all_speeds = fixed.all_recovery_speeds
+            elif fixed.agent_performances:
+                for perf in fixed.agent_performances:
+                    all_speeds.extend(perf.recovery_speeds)
+            
             if all_speeds:
                 data_to_plot.append(all_speeds)
                 labels.append(f'β={beta_val:.1f}')
@@ -323,6 +335,14 @@ def plot_recovery_analysis(conditions, output_dir):
                     colors.append('#3498db')
                 else:
                     colors.append('#95a5a6')
+        
+        # データが空の場合はスキップ
+        if not data_to_plot:
+            ax.text(0.5, 0.5, 'No recovery data available\n(lightweight mode may not preserve this data)',
+                   ha='center', va='center', transform=ax.transAxes, fontsize=10)
+            ax.set_title(f'Recovery After Env. Change\nVolatility: {vol_interval} steps',
+                        fontsize=12, fontweight='bold')
+            continue
         
         # Create violin plot
         parts = ax.violinplot(data_to_plot, positions=positions, 
@@ -373,23 +393,41 @@ def plot_phase3_performance(conditions, comparisons, output_dir):
         colors = []
         
         for cond in conds:
-            # Collect phase 3 rewards from all agents
-            phase3_rewards = []
-            for perf in cond.agent_performances:
-                if len(perf.rewards_per_window) > 2:  # Ensure phase 3 exists
-                    phase3_rewards.append(perf.rewards_per_window[2])
-            
-            if not phase3_rewards:
-                continue
-            
-            phase3_data.append({
-                'mean': np.mean(phase3_rewards),
-                'sem': stats.sem(phase3_rewards),
-                'cond': cond
-            })
+            # 軽量モードではagent_performancesが空なので、mean_rewards_per_windowを使用
+            if cond.agent_performances:
+                # 詳細データがある場合
+                phase3_rewards = []
+                for perf in cond.agent_performances:
+                    if len(perf.rewards_per_window) > 2:  # Ensure phase 3 exists
+                        phase3_rewards.append(perf.rewards_per_window[2])
+                
+                if not phase3_rewards:
+                    continue
+                
+                phase3_data.append({
+                    'mean': np.mean(phase3_rewards),
+                    'sem': stats.sem(phase3_rewards),
+                    'cond': cond
+                })
+            elif len(cond.mean_rewards_per_window) > 2:
+                # 軽量モードの場合、集計済みデータを使用
+                # SEMは推定値として std/sqrt(num_agents) を使用
+                phase3_data.append({
+                    'mean': cond.mean_rewards_per_window[2],
+                    'sem': cond.std_rewards_per_window[2] / np.sqrt(cond.num_agents) if len(cond.std_rewards_per_window) > 2 else 0,
+                    'cond': cond
+                })
         
         # Sort by mean performance
         phase3_data.sort(key=lambda x: x['mean'], reverse=True)
+        
+        # データが空の場合はスキップ
+        if not phase3_data:
+            ax.text(0.5, 0.5, 'No phase 3 data available',
+                   ha='center', va='center', transform=ax.transAxes, fontsize=10)
+            ax.set_title(f'Phase 3 Performance\nVolatility Interval: {vol_interval} steps', 
+                        fontsize=12, fontweight='bold')
+            continue
         
         # Prepare plot data
         means = [d['mean'] for d in phase3_data]
@@ -495,25 +533,48 @@ def plot_phase3_total_reward(conditions, comparisons, output_dir):
         phase3_data = []
         
         for cond in conds:
-            # Collect phase 3 total rewards from all agents
-            phase3_total_rewards = []
-            for perf in cond.agent_performances:
-                # Use post_change_rewards[2] if available (3rd environment change)
-                if len(perf.post_change_rewards) > 2 and len(perf.post_change_rewards[2]) > 0:
-                    total_reward = sum(perf.post_change_rewards[2])
-                    phase3_total_rewards.append(total_reward)
-            
-            if not phase3_total_rewards:
-                continue
-            
-            phase3_data.append({
-                'mean': np.mean(phase3_total_rewards),
-                'sem': stats.sem(phase3_total_rewards),
-                'cond': cond
-            })
+            # 軽量モードではpost_change_rewardsが空なので、mean_rewards_per_windowから推定
+            if cond.agent_performances and any(len(p.post_change_rewards) > 2 for p in cond.agent_performances):
+                # Collect phase 3 total rewards from all agents
+                phase3_total_rewards = []
+                for perf in cond.agent_performances:
+                    # Use post_change_rewards[2] if available (3rd environment change)
+                    if len(perf.post_change_rewards) > 2 and len(perf.post_change_rewards[2]) > 0:
+                        total_reward = sum(perf.post_change_rewards[2])
+                        phase3_total_rewards.append(total_reward)
+                
+                if not phase3_total_rewards:
+                    continue
+                
+                phase3_data.append({
+                    'mean': np.mean(phase3_total_rewards),
+                    'sem': stats.sem(phase3_total_rewards),
+                    'cond': cond
+                })
+            elif len(cond.mean_rewards_per_window) > 2:
+                # 軽量モードの場合、平均報酬から推定
+                # Phase 3の合計報酬 = 平均報酬 × ステップ数（推定）
+                # volatility_intervalを使用して推定
+                estimated_steps_in_phase3 = cond.volatility_interval
+                estimated_total = cond.mean_rewards_per_window[2] * estimated_steps_in_phase3
+                estimated_sem = (cond.std_rewards_per_window[2] / np.sqrt(cond.num_agents)) * estimated_steps_in_phase3 if len(cond.std_rewards_per_window) > 2 else 0
+                
+                phase3_data.append({
+                    'mean': estimated_total,
+                    'sem': estimated_sem,
+                    'cond': cond
+                })
         
         # Sort by mean performance
         phase3_data.sort(key=lambda x: x['mean'], reverse=True)
+        
+        # データが空の場合はスキップ
+        if not phase3_data:
+            ax.text(0.5, 0.5, 'No phase 3 data available',
+                   ha='center', va='center', transform=ax.transAxes, fontsize=10)
+            ax.set_title(f'Phase 3 Total Reward\nVolatility Interval: {vol_interval} steps', 
+                        fontsize=12, fontweight='bold')
+            continue
         
         # Prepare plot data
         means = [d['mean'] for d in phase3_data]

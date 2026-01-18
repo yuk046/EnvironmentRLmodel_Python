@@ -20,6 +20,7 @@ import math
 import time
 from dataclasses import dataclass, field, asdict
 from typing import List, Tuple, Optional, Dict
+from concurrent.futures import ProcessPoolExecutor, as_completed
 import matplotlib.pyplot as plt
 import matplotlib.patches as mpatches
 import numpy as np
@@ -666,35 +667,52 @@ def run_experiment_condition(
     num_steps: int,
     base_seed: int,
     num_runs: int = 1,
-    uncertainty_based_beta: bool = False
+    uncertainty_based_beta: bool = False,
+    max_workers: int = None
 ) -> ExperimentCondition:
-    """Run full experiment for one condition"""
+    """Run full experiment for one condition with parallel processing"""
     
     print(f"\nRunning: {condition_name}")
     print(f"  Beta: {beta_type}, Volatility: {volatility_interval}, Agents: {num_agents}, Runs: {num_runs}")
+    print(f"  Parallel workers: {max_workers if max_workers else 'auto'}")
     
     start_time = time.time()
-    agent_performances = []
     
+    # Prepare all agent tasks
+    tasks = []
     for run in range(num_runs):
         run_seed_offset = run * 100000
         for i in range(num_agents):
             agent_idx = run * num_agents + i
-            if (agent_idx + 1) % 50 == 0:
-                elapsed = time.time() - start_time
-                print(f"    Run {run+1}/{num_runs}, Agent {i+1}/{num_agents} (Total: {agent_idx+1}/{num_agents*num_runs}, {elapsed:.1f}s)")
-            
             seed = base_seed + run_seed_offset + i
-            perf = run_single_agent(
-                agent_id=agent_idx,
-                beta_type=beta_type,
-                fixed_beta=fixed_beta,
-                volatility_interval=volatility_interval,
-                num_steps=num_steps,
-                seed=seed,
-                uncertainty_based_beta=uncertainty_based_beta
-            )
+            tasks.append((
+                agent_idx,
+                beta_type,
+                fixed_beta,
+                volatility_interval,
+                num_steps,
+                seed,
+                uncertainty_based_beta
+            ))
+    
+    # Execute tasks in parallel
+    agent_performances = []
+    total_tasks = len(tasks)
+    completed = 0
+    
+    with ProcessPoolExecutor(max_workers=max_workers) as executor:
+        # Submit all tasks
+        future_to_task = {executor.submit(run_single_agent, *task): task for task in tasks}
+        
+        # Collect results as they complete
+        for future in as_completed(future_to_task):
+            perf = future.result()
             agent_performances.append(perf)
+            completed += 1
+            
+            if completed % 50 == 0 or completed == total_tasks:
+                elapsed = time.time() - start_time
+                print(f"    Progress: {completed}/{total_tasks} agents completed ({elapsed:.1f}s)")
     
     # Aggregate statistics
     total_rewards = [p.total_reward for p in agent_performances]
@@ -798,9 +816,10 @@ def run_large_scale_experiment(
     base_seed: int = 42,
     num_runs: int = 1,
     volatility_intervals: List[int] = [200, 350, 500],
-    output_dir: str = "large_scale_results"
+    output_dir: str = "large_scale_results",
+    max_workers: int = None
 ):
-    """Run comprehensive large-scale experiment"""
+    """Run comprehensive large-scale experiment with parallel processing"""
     
     import os
     os.makedirs(output_dir, exist_ok=True)
@@ -835,7 +854,8 @@ def run_large_scale_experiment(
             num_steps=num_steps,
             base_seed=base_seed + vol_interval * 10000,
             num_runs=num_runs,
-            uncertainty_based_beta=True  # 不確実性ベースのβ適応を有効化
+            uncertainty_based_beta=True,  # 不確実性ベースのβ適応を有効化
+            max_workers=max_workers
         )
         all_conditions.append(cond)
         
@@ -849,7 +869,8 @@ def run_large_scale_experiment(
                 num_agents=num_agents,
                 num_steps=num_steps,
                 base_seed=base_seed + vol_interval * 10000 + int(beta_val * 1000),
-                num_runs=num_runs
+                num_runs=num_runs,
+                max_workers=max_workers
             )
             all_conditions.append(cond)
     
@@ -958,6 +979,8 @@ def main():
                        help='Base random seed')
     parser.add_argument('--output-dir', type=str, default='large_scale_results',
                        help='Output directory')
+    parser.add_argument('--max-workers', type=int, default=None,
+                       help='Maximum number of parallel workers (default: CPU count)')
     
     args = parser.parse_args()
     
@@ -969,7 +992,8 @@ def main():
         num_runs=args.num_runs,
         base_seed=args.seed,
         volatility_intervals=[200, 350, 500],
-        output_dir=args.output_dir
+        output_dir=args.output_dir,
+        max_workers=args.max_workers
     )
     
     elapsed = time.time() - start_time

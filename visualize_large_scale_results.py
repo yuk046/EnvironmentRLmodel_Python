@@ -670,6 +670,7 @@ def create_summary_table(conditions, comparisons, output_dir):
 
 def main():
     import argparse
+    import os
     
     parser = argparse.ArgumentParser(description='Visualize large-scale experiment results')
     parser.add_argument('--input-dir', type=str, default='large_scale_results',
@@ -678,6 +679,9 @@ def main():
                        help='Output directory for figures')
     
     args = parser.parse_args()
+    
+    # Create output directory if it doesn't exist
+    os.makedirs(args.output_dir, exist_ok=True)
     
     print("="*70)
     print("PUBLICATION-QUALITY VISUALIZATION")

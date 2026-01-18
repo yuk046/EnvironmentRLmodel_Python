@@ -815,7 +815,7 @@ def run_large_scale_experiment(
     num_steps: int = 8000,
     base_seed: int = 42,
     num_runs: int = 1,
-    volatility_intervals: List[int] = [200, 350, 500],
+    volatility_intervals: List[int] = [200, 500, 1000],
     output_dir: str = "large_scale_results",
     max_workers: int = None
 ):
@@ -991,7 +991,7 @@ def main():
         num_steps=args.num_steps,
         num_runs=args.num_runs,
         base_seed=args.seed,
-        volatility_intervals=[200, 350, 500],
+        volatility_intervals=[200, 500, 1000],
         output_dir=args.output_dir,
         max_workers=args.max_workers
     )

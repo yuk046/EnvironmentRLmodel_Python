@@ -1438,6 +1438,7 @@ def plot_beta_analysis(beta_stats: BetaStatistics, output_prefix: str = "beta_an
                          linewidth=1.5, alpha=0.5)
         
         ax7_1.set_ylabel('Usage Rate (%)', fontsize=12)
+        ax7_1.set_ylim(5, 26)
         ax7_1.set_title(f'時間窓別β使用率: 依存群 (n={n_addicted_agents} agents)', 
                        fontsize=14, fontweight='bold')
         ax7_1.legend(loc='best', fontsize=10, ncol=3)
@@ -1458,6 +1459,7 @@ def plot_beta_analysis(beta_stats: BetaStatistics, output_prefix: str = "beta_an
         
         ax7_2.set_xlabel('Step (window center)', fontsize=12)
         ax7_2.set_ylabel('Usage Rate (%)', fontsize=12)
+        ax7_2.set_ylim(5, 26)
         ax7_2.set_title(f'時間窓別β使用率: 非依存群 (n={n_non_addicted_agents} agents)', 
                        fontsize=14, fontweight='bold')
         ax7_2.legend(loc='best', fontsize=10, ncol=3)
@@ -1466,6 +1468,129 @@ def plot_beta_analysis(beta_stats: BetaStatistics, output_prefix: str = "beta_an
         plt.tight_layout()
         plt.savefig(f"{output_prefix}_usage_timeseries.png", dpi=150, bbox_inches='tight')
         print(f"Saved: {output_prefix}_usage_timeseries.png")
+        plt.close()
+        
+        # ===== Figure 8: β切り替え回数の分布と飛び越し選択の頻度 =====
+        fig8, axes8 = plt.subplots(1, 2, figsize=(16, 6))
+        
+        # 各エージェントのβ切り替え回数と飛び越し選択の回数を計算
+        beta_switches_addicted = []
+        beta_switches_non_addicted = []
+        beta_jump_distances_addicted = []
+        beta_jump_distances_non_addicted = []
+        
+        for agent_idx, is_addicted in enumerate(addiction_array):
+            agent_betas = beta_matrix[agent_idx]
+            
+            # β切り替え回数を計算（隣接するステップでβが変化した回数）
+            switches = 0
+            jump_distances = []
+            
+            for i in range(len(agent_betas) - 1):
+                if not np.isclose(agent_betas[i], agent_betas[i+1]):
+                    switches += 1
+                    
+                    # 飛び越し距離を計算（β値のインデックス差分）
+                    beta_idx_current = np.argmin(np.abs(BETA_VALUES - agent_betas[i]))
+                    beta_idx_next = np.argmin(np.abs(BETA_VALUES - agent_betas[i+1]))
+                    jump_distance = abs(beta_idx_next - beta_idx_current)
+                    jump_distances.append(jump_distance)
+            
+            if is_addicted:
+                beta_switches_addicted.append(switches)
+                beta_jump_distances_addicted.extend(jump_distances)
+            else:
+                beta_switches_non_addicted.append(switches)
+                beta_jump_distances_non_addicted.extend(jump_distances)
+        
+        # (1) β切り替え回数の分布（左図）
+        ax8_1 = axes8[0]
+        
+        # ヒストグラム（重ね合わせ）
+        bins_switches = np.linspace(
+            min(min(beta_switches_addicted, default=0), min(beta_switches_non_addicted, default=0)),
+            max(max(beta_switches_addicted, default=1000), max(beta_switches_non_addicted, default=1000)),
+            40
+        )
+        
+        ax8_1.hist(beta_switches_addicted, bins=bins_switches, alpha=0.6, 
+                  label=f'依存群 (n={n_addicted})', color='#e74c3c', density=True)
+        ax8_1.hist(beta_switches_non_addicted, bins=bins_switches, alpha=0.6,
+                  label=f'非依存群 (n={n_non_addicted})', color='#3498db', density=True)
+        
+        ax8_1.set_xlabel('β切り替え回数（全ステップ）', fontsize=13)
+        ax8_1.set_ylabel('Density', fontsize=13)
+        ax8_1.set_title('β切り替え回数の分布', fontsize=14, fontweight='bold')
+        ax8_1.legend(fontsize=12)
+        ax8_1.grid(True, alpha=0.3)
+        
+        # 平均値を垂直線で表示
+        mean_switches_add = np.mean(beta_switches_addicted)
+        mean_switches_non = np.mean(beta_switches_non_addicted)
+        ax8_1.axvline(mean_switches_add, color='#e74c3c', linestyle='--', 
+                     linewidth=2, label=f'依存群平均: {mean_switches_add:.1f}')
+        ax8_1.axvline(mean_switches_non, color='#3498db', linestyle='--',
+                     linewidth=2, label=f'非依存群平均: {mean_switches_non:.1f}')
+        ax8_1.legend(fontsize=11)
+        
+        # (2) β「飛び越し選択」の頻度（右図）
+        ax8_2 = axes8[1]
+        
+        # 飛び越し距離のヒストグラム（積み上げ棒グラフ）
+        max_jump = 5  # β値のインデックス最大差（0から5まで）
+        jump_labels = ['隣接', '1', '2', '3', '4', '最大']
+        
+        # 各距離の出現回数を計算
+        jump_counts_add = []
+        jump_counts_non = []
+        
+        for jump_dist in range(max_jump + 1):
+            count_add = np.sum(np.array(beta_jump_distances_addicted) == jump_dist)
+            count_non = np.sum(np.array(beta_jump_distances_non_addicted) == jump_dist)
+            jump_counts_add.append(count_add)
+            jump_counts_non.append(count_non)
+        
+        # 割合に変換
+        total_jumps_add = len(beta_jump_distances_addicted)
+        total_jumps_non = len(beta_jump_distances_non_addicted)
+        
+        if total_jumps_add > 0:
+            jump_freq_add = [c / total_jumps_add for c in jump_counts_add]
+        else:
+            jump_freq_add = [0] * (max_jump + 1)
+        
+        if total_jumps_non > 0:
+            jump_freq_non = [c / total_jumps_non for c in jump_counts_non]
+        else:
+            jump_freq_non = [0] * (max_jump + 1)
+        
+        x_pos_jump = np.arange(len(jump_labels))
+        width_jump = 0.35
+        
+        bars_jump_add = ax8_2.bar(x_pos_jump - width_jump/2, jump_freq_add, width_jump,
+                                  label='依存群', color='#e74c3c', alpha=0.7)
+        bars_jump_non = ax8_2.bar(x_pos_jump + width_jump/2, jump_freq_non, width_jump,
+                                  label='非依存群', color='#3498db', alpha=0.7)
+        
+        ax8_2.set_xlabel('β切り替え時の距離（インデックス差分）', fontsize=13)
+        ax8_2.set_ylabel('Density', fontsize=13)
+        ax8_2.set_title('β「飛び越し選択」の頻度', fontsize=14, fontweight='bold')
+        ax8_2.set_xticks(x_pos_jump)
+        ax8_2.set_xticklabels(jump_labels, fontsize=11)
+        ax8_2.legend(fontsize=12)
+        ax8_2.grid(True, alpha=0.3, axis='y')
+        
+        # 各バーに値を表示
+        for bars in [bars_jump_add, bars_jump_non]:
+            for bar in bars:
+                height = bar.get_height()
+                if height > 0:
+                    ax8_2.text(bar.get_x() + bar.get_width()/2, height,
+                              f'{height:.3f}', ha='center', va='bottom', fontsize=9)
+        
+        plt.tight_layout()
+        plt.savefig(f"{output_prefix}_beta_switches_jumps.png", dpi=150, bbox_inches='tight')
+        print(f"Saved: {output_prefix}_beta_switches_jumps.png")
         plt.close()
     
     print("\n" + "="*60)

@@ -1448,7 +1448,7 @@ def plot_beta_analysis(beta_stats: BetaStatistics, output_prefix: str = "beta_an
                          linewidth=1.5, alpha=0.5)
         
         ax7_1.set_ylabel('Usage Rate (%)', fontsize=16)
-        ax7_1.set_ylim(5, 26)
+        ax7_1.set_ylim(0, 26)
         ax7_1.set_title(f'Windowed β Usage: Addicted (n={n_addicted_agents} agents)', 
                    fontsize=18, fontweight='bold')
         ax7_1.legend(loc='best', fontsize=16, ncol=3)
@@ -1469,7 +1469,7 @@ def plot_beta_analysis(beta_stats: BetaStatistics, output_prefix: str = "beta_an
         
         ax7_2.set_xlabel('Step (window center)', fontsize=16)
         ax7_2.set_ylabel('Usage Rate (%)', fontsize=16)
-        ax7_2.set_ylim(5, 26)
+        ax7_2.set_ylim(0, 26)
         ax7_2.set_title(f'Windowed β Usage: Non-addicted (n={n_non_addicted_agents} agents)', 
                    fontsize=18, fontweight='bold')
         ax7_2.legend(loc='best', fontsize=16, ncol=3)
@@ -1548,32 +1548,34 @@ def plot_beta_analysis(beta_stats: BetaStatistics, output_prefix: str = "beta_an
         
         # 飛び越し距離のヒストグラム（積み上げ棒グラフ）
         max_jump = 5  # β値のインデックス最大差（0から5まで）
-        jump_labels = ['Adjacent', '1', '2', '3', '4', 'Max']
-        
-        # 各距離の出現回数を計算
+        # Exclude the zero-distance (adjacent) category entirely as requested
+        jump_labels = ['1', '2', '3', '4', 'Max']  # corresponds to distances 1..5
+
+        # 各距離の出現回数を計算（0 を除く）
         jump_counts_add = []
         jump_counts_non = []
-        
-        for jump_dist in range(max_jump + 1):
+
+        for jump_dist in range(1, max_jump + 1):
             count_add = np.sum(np.array(beta_jump_distances_addicted) == jump_dist)
             count_non = np.sum(np.array(beta_jump_distances_non_addicted) == jump_dist)
             jump_counts_add.append(count_add)
             jump_counts_non.append(count_non)
-        
+
         # 割合に変換
         total_jumps_add = len(beta_jump_distances_addicted)
         total_jumps_non = len(beta_jump_distances_non_addicted)
-        
+
+        n_bins = max_jump  # number of displayed bins (1..5)
         if total_jumps_add > 0:
             jump_freq_add = [c / total_jumps_add for c in jump_counts_add]
         else:
-            jump_freq_add = [0] * (max_jump + 1)
-        
+            jump_freq_add = [0] * n_bins
+
         if total_jumps_non > 0:
             jump_freq_non = [c / total_jumps_non for c in jump_counts_non]
         else:
-            jump_freq_non = [0] * (max_jump + 1)
-        
+            jump_freq_non = [0] * n_bins
+
         x_pos_jump = np.arange(len(jump_labels))
         width_jump = 0.35
         

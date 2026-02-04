@@ -430,9 +430,13 @@ class AdaptiveBetaAgent:
         else:
             # If uncertainty-based β is disabled, strengthen TD-based adaptation
             if not self.use_uncertainty_beta:
-                self.td_error_threshold = max(0.5, self.td_error_threshold * 0.5)
-                self.td_bias_scale = 1.0
-                self.epsilon_beta_local = EPSILON_BETA * 0.5
+                # Lower the TD threshold and increase MB bias so adaptive β shifts faster
+                self.td_error_threshold = max(0.25, self.td_error_threshold * 0.4)
+                self.td_bias_scale = 1.5
+                # Reduce random beta exploration to stabilize around learned beta
+                self.epsilon_beta_local = max(0.02, EPSILON_BETA * 0.3)
+                # Small prior favoring mid-range betas for stability under volatility
+                self.q_beta = np.array([0.0, 0.08, 0.12, 0.12, 0.08, 0.0], dtype=np.float64)
         
         self.model_counts = np.zeros((NUM_STATES, NUM_ACTIONS, NUM_STATES), dtype=np.float64)
         self.model_rewards = np.zeros((NUM_STATES, NUM_ACTIONS, NUM_STATES), dtype=np.float64)

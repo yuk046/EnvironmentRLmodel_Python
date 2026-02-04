@@ -429,6 +429,7 @@ class HybridAgent:
         self.td_error_window = 10
         self.td_bias_scale = 0.5  # TD誤差が大きいときMB寄りにバイアス
         self.epsilon_beta_local = EPSILON_BETA
+        self.beta_history: List[float] = []
 
         # 不確実性ベースβ適応用
         self.td_window_size = 20
@@ -452,9 +453,10 @@ class HybridAgent:
         else:
             # 不確実性βを使わない場合はTDバイアスを強める
             if not self.use_uncertainty_beta:
-                self.td_error_threshold = max(0.5, self.td_error_threshold * 0.5)
-                self.td_bias_scale = 1.0
-                self.epsilon_beta_local = EPSILON_BETA * 0.5
+                self.td_error_threshold = max(0.25, self.td_error_threshold * 0.4)
+                self.td_bias_scale = 1.5
+                self.epsilon_beta_local = max(0.02, EPSILON_BETA * 0.3)
+                self.q_beta = np.array([0.0, 0.08, 0.12, 0.12, 0.08, 0.0], dtype=np.float64)
         
         # メンタルモデル (Numba用にfloat64で定義)
         # [今の状態, 行動, 次の状態] に何回遷移したかを記録する3次元配列
@@ -526,6 +528,7 @@ class HybridAgent:
         # βを選択（状態に関係なくグローバルに選択）
         self.current_beta_idx = self.select_beta()
         current_beta = BETA_VALUES[self.current_beta_idx]
+        self.beta_history.append(current_beta)
         
         # MB Planning (JIT function call)
         self._plan_q_values()
@@ -546,37 +549,30 @@ class HybridAgent:
 
     # モデルの学習機構
     def observe(self, state: int, action: int, reward: float, next_state: int, phase_idx: int):
-        # --- β学習の更新(固定β値モードではスキップ) ---
-        if self.fixed_beta is None and self.prev_beta_idx is not None:
-            # 前のステップで選択したβのQ値を更新
-            # TD学習: Q(β) ← Q(β) + α * (R + γ*max_β' Q(β') - Q(β))
-            td_target_beta = reward + DISCOUNT * np.max(self.q_beta)
-            self.q_beta[self.prev_beta_idx] += ALPHA_BETA * (
-                td_target_beta - self.q_beta[self.prev_beta_idx]
-            )
-        
-        # 次回のβ更新のために現在のβインデックスを記憶(固定β値モードではスキップ)
-        if self.fixed_beta is None:
-            self.prev_beta_idx = self.current_beta_idx
-        
-        # --- Model-Free (直感) の更新 ---
-        # Q学習の式: Q(s,a) ← Q(s,a) + α * (R + γ*maxQ(s') - Q(s,a))
+        # Model-free TD 誤差と更新
         td_target = reward + DISCOUNT * np.max(self.q_mf[next_state])
         td_error = td_target - self.q_mf[state, action]
 
-        # TD誤差の履歴を保持（β適応用）
         self.td_error_history.append(td_error)
         self.recent_td_errors.append(td_error)
         if len(self.recent_td_errors) > self.td_error_window:
             self.recent_td_errors.pop(0)
 
-        # 不確実性ベースβのために移動平均を更新
         if self.use_uncertainty_beta:
             if len(self.td_error_history) > self.td_window_size:
-                window = self.td_error_history[-self.td_window_size:]
-                self.td_error_ma = np.mean(np.abs(window))
+                recent_for_ma = self.td_error_history[-self.td_window_size:]
+                self.td_error_ma = np.mean(np.abs(recent_for_ma))
             else:
                 self.td_error_ma = np.mean(np.abs(self.td_error_history)) if self.td_error_history else 0.0
+
+        if self.fixed_beta is None and self.prev_beta_idx is not None:
+            td_target_beta = reward + DISCOUNT * np.max(self.q_beta)
+            self.q_beta[self.prev_beta_idx] += ALPHA_BETA * (
+                td_target_beta - self.q_beta[self.prev_beta_idx]
+            )
+
+        if self.fixed_beta is None:
+            self.prev_beta_idx = self.current_beta_idx
 
         self.q_mf[state, action] += ALPHA_MF * td_error
         # MB Model Update (論文準拠)
@@ -1532,7 +1528,7 @@ def plot_beta_analysis(beta_stats: BetaStatistics, output_prefix: str = "beta_an
                          linewidth=1.5, alpha=0.5)
         
         ax7_1.set_ylabel('Usage Rate (%)', fontsize=22)
-        ax7_1.set_ylim(0, 26)
+        
         ax7_1.set_title(f'Windowed β Usage: Addicted (n={n_addicted_agents} agents)', 
                    fontsize=21, fontweight='bold')
         ax7_1.legend(loc='best', fontsize=19, ncol=3)
@@ -1553,7 +1549,7 @@ def plot_beta_analysis(beta_stats: BetaStatistics, output_prefix: str = "beta_an
         
         ax7_2.set_xlabel('Step (window center)', fontsize=22)
         ax7_2.set_ylabel('Usage Rate (%)', fontsize=22)
-        ax7_2.set_ylim(0, 26)
+        
         ax7_2.set_title(f'Windowed β Usage: Non-addicted (n={n_non_addicted_agents} agents)', 
                    fontsize=21, fontweight='bold')
         ax7_2.legend(loc='best', fontsize=19, ncol=3)

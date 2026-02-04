@@ -799,13 +799,13 @@ def plot_beta_analysis(beta_stats: BetaStatistics, output_prefix: str = "beta_an
     matplotlib.rcParams['axes.unicode_minus'] = False  # マイナス記号の文字化け対策
     # 全体フォントサイズを大きめに設定（16pt以上）
     matplotlib.rcParams.update({
-        'font.size': 16,
-        'axes.titlesize': 18,
-        'axes.labelsize': 16,
-        'xtick.labelsize': 16,
-        'ytick.labelsize': 16,
-        'legend.fontsize': 16,
-        'figure.titlesize': 18,
+        'font.size': 19,
+        'axes.titlesize': 21,
+        'axes.labelsize': 19,
+        'xtick.labelsize': 22,
+        'ytick.labelsize': 22,
+        'legend.fontsize': 19,
+        'figure.titlesize': 21,
     })
     
     # 全エージェントのデータを2次元配列に変換
@@ -840,21 +840,21 @@ def plot_beta_analysis(beta_stats: BetaStatistics, output_prefix: str = "beta_an
     phase_boundary = np.where(np.diff(phase_mean) != 0)[0]
     for boundary in phase_boundary:
         ax1_top.axvline(step_array[boundary], color='gray', linestyle='--', alpha=0.5, linewidth=1.5)
-        ax1_top.text(step_array[boundary], 1.02, 'Phase Change', ha='center', fontsize=16)
+        ax1_top.text(step_array[boundary], 1.02, 'Phase Change', ha='center', fontsize=19)
     
-    ax1_top.set_ylabel('Selected β Value', fontsize=16)
+    ax1_top.set_ylabel('Selected β Value', fontsize=19)
     ax1_top.set_ylim(-0.05, 1.1)
     ax1_top.set_title(f'β Selection Over Time - Mean±SD across {beta_stats.num_agents} agents', 
-                      fontsize=18, fontweight='bold')
+                      fontsize=21, fontweight='bold')
     ax1_top.legend(loc='upper right')
     ax1_top.grid(True, alpha=0.3)
     
     # 下段: 状態の時系列（平均）
     ax1_bottom = fig1.add_subplot(gs1[1], sharex=ax1_top)
     ax1_bottom.plot(step_array, state_mean, 'b-', linewidth=1, alpha=0.7)
-    ax1_bottom.set_xlabel('Step', fontsize=16)
-    ax1_bottom.set_ylabel('Mean State', fontsize=16)
-    ax1_bottom.set_title('Average State Trajectory', fontsize=18)
+    ax1_bottom.set_xlabel('Step', fontsize=19)
+    ax1_bottom.set_ylabel('Mean State', fontsize=19)
+    ax1_bottom.set_title('Average State Trajectory', fontsize=21)
     ax1_bottom.grid(True, alpha=0.3)
     
     plt.tight_layout()
@@ -888,12 +888,12 @@ def plot_beta_analysis(beta_stats: BetaStatistics, output_prefix: str = "beta_an
             count = np.sum(np.isclose(phase_betas, beta_val))
             percentage = 100.0 * count / len(phase_betas)
             ax.text(beta_val, count, f'{percentage:.1f}%', 
-                   ha='center', va='bottom', fontsize=16, fontweight='bold')
+                   ha='center', va='bottom', fontsize=19, fontweight='bold')
         
-        ax.set_xlabel('β Value', fontsize=16)
-        ax.set_ylabel('Frequency', fontsize=16)
+        ax.set_xlabel('β Value', fontsize=19)
+        ax.set_ylabel('Frequency', fontsize=19)
         ax.set_title(f'{phase_name} Phase (n={len(phase_betas)} steps, {beta_stats.num_agents} agents)', 
-                    fontsize=18, fontweight='bold')
+                    fontsize=21, fontweight='bold')
         ax.set_xticks(BETA_VALUES)
         ax.grid(True, alpha=0.3, axis='y')
     
@@ -923,13 +923,13 @@ def plot_beta_analysis(beta_stats: BetaStatistics, output_prefix: str = "beta_an
     
     # カラーバー
     cbar = plt.colorbar(im, ax=ax3)
-    cbar.set_label('Selection Percentage (%)', fontsize=16)
+    cbar.set_label('Selection Percentage (%)', fontsize=19)
     
     # 軸ラベル
-    ax3.set_xlabel('State', fontsize=16)
-    ax3.set_ylabel('β Value', fontsize=16)
+    ax3.set_xlabel('State', fontsize=19)
+    ax3.set_ylabel('β Value', fontsize=19)
     ax3.set_title(f'β Selection Heatmap by State ({beta_stats.num_agents} agents)', 
-                  fontsize=18, fontweight='bold')
+                  fontsize=21, fontweight='bold')
     ax3.set_xticks(range(NUM_STATES))
     ax3.set_yticks(range(len(BETA_VALUES)))
     ax3.set_yticklabels([f'{b:.1f}' for b in BETA_VALUES])
@@ -962,7 +962,7 @@ def plot_beta_analysis(beta_stats: BetaStatistics, output_prefix: str = "beta_an
         autotext.set_color('white')
         autotext.set_fontweight('bold')
     ax4_1.set_title(f'Overall β Distribution\n({beta_stats.num_agents} agents)', 
-                    fontsize=18, fontweight='bold')
+                    fontsize=21, fontweight='bold')
     
     # (2) フェーズごとの平均β
     ax4_2 = axes4[0, 1]
@@ -970,9 +970,9 @@ def plot_beta_analysis(beta_stats: BetaStatistics, output_prefix: str = "beta_an
     phase_stds = [np.std(beta_all[phase_all == i]) for i in range(len(PHASES))]
     bars = ax4_2.bar(phase_names, phase_means, yerr=phase_stds, 
                      color=['#3498db', '#e74c3c'], alpha=0.7, capsize=10)
-    ax4_2.set_ylabel('Mean β Value', fontsize=16)
+    ax4_2.set_ylabel('Mean β Value', fontsize=19)
     ax4_2.set_ylim(0, 1)
-    ax4_2.set_title('Average β by Phase', fontsize=18, fontweight='bold')
+    ax4_2.set_title('Average β by Phase', fontsize=21, fontweight='bold')
     ax4_2.grid(True, alpha=0.3, axis='y')
     
     # 値を表示
@@ -1001,9 +1001,9 @@ def plot_beta_analysis(beta_stats: BetaStatistics, output_prefix: str = "beta_an
     bars3 = ax4_3.barh(type_labels, type_means, xerr=type_stds, 
                        color=['#2ecc71', '#f39c12', '#e74c3c', '#9b59b6'], 
                        alpha=0.7, capsize=10)
-    ax4_3.set_xlabel('Mean β Value', fontsize=16)
+    ax4_3.set_xlabel('Mean β Value', fontsize=19)
     ax4_3.set_xlim(0, 1)
-    ax4_3.set_title('Average β by State Type', fontsize=18, fontweight='bold')
+    ax4_3.set_title('Average β by State Type', fontsize=21, fontweight='bold')
     ax4_3.grid(True, alpha=0.3, axis='x')
     
     # (4) β値の推移（学習曲線、平均±標準偏差）
@@ -1024,10 +1024,10 @@ def plot_beta_analysis(beta_stats: BetaStatistics, output_prefix: str = "beta_an
         ax4_4.errorbar(bin_steps, bin_means, yerr=bin_stds, 
                       fmt='o-', linewidth=2, markersize=8, color='#e67e22',
                       capsize=5, capthick=2)
-        ax4_4.set_xlabel('Step', fontsize=16)
-        ax4_4.set_ylabel('Mean β Value', fontsize=16)
+        ax4_4.set_xlabel('Step', fontsize=19)
+        ax4_4.set_ylabel('Mean β Value', fontsize=19)
         ax4_4.set_ylim(0, 1)
-        ax4_4.set_title('β Learning Curve (binned average±SD)', fontsize=18, fontweight='bold')
+        ax4_4.set_title('β Learning Curve (binned average±SD)', fontsize=21, fontweight='bold')
         ax4_4.grid(True, alpha=0.3)
     
     plt.tight_layout()
@@ -1071,12 +1071,12 @@ def plot_beta_analysis(beta_stats: BetaStatistics, output_prefix: str = "beta_an
         bars2 = ax5_1.bar(x_pos + width/2, freq_non_addicted, width,
                          label=f'Non-addicted (n={n_non_addicted})', color='#2ecc71', alpha=0.7)
         
-        ax5_1.set_xlabel('β Value', fontsize=16)
-        ax5_1.set_ylabel('Selection Frequency (%)', fontsize=16)
+        ax5_1.set_xlabel('β Value', fontsize=19)
+        ax5_1.set_ylabel('Selection Frequency (%)', fontsize=19)
         ax5_1.set_title('β Selection Frequency: Addicted vs Non-addicted', 
-                   fontsize=18, fontweight='bold')
+                   fontsize=21, fontweight='bold')
         ax5_1.set_xticks(x_pos)
-        ax5_1.set_xticklabels([f'{b:.1f}' for b in BETA_VALUES])
+        ax5_1.set_xticklabels([f'{b:.1f}' for b in BETA_VALUES], fontsize=22)
         ax5_1.legend()
         ax5_1.grid(True, alpha=0.3, axis='y')
         
@@ -1086,9 +1086,9 @@ def plot_beta_analysis(beta_stats: BetaStatistics, output_prefix: str = "beta_an
                   color='#e74c3c', density=True)
         ax5_2.hist(beta_non_addicted, bins=20, alpha=0.6, label=f'Non-addicted (n={n_non_addicted})',
                   color='#2ecc71', density=True)
-        ax5_2.set_xlabel('β Value', fontsize=16)
-        ax5_2.set_ylabel('Density', fontsize=16)
-        ax5_2.set_title('β Distribution Comparison', fontsize=18, fontweight='bold')
+        ax5_2.set_xlabel('β Value', fontsize=19)
+        ax5_2.set_ylabel('Density', fontsize=19)
+        ax5_2.set_title('β Distribution Comparison', fontsize=21, fontweight='bold')
         ax5_2.legend()
         ax5_2.grid(True, alpha=0.3)
         
@@ -1103,8 +1103,8 @@ def plot_beta_analysis(beta_stats: BetaStatistics, output_prefix: str = "beta_an
         bp['boxes'][1].set_facecolor('#2ecc71')
         bp['boxes'][1].set_alpha(0.7)
         
-        ax5_3.set_ylabel('β Value', fontsize=16)
-        ax5_3.set_title('β Value Distribution (Boxplot)', fontsize=18, fontweight='bold')
+        ax5_3.set_ylabel('β Value', fontsize=19)
+        ax5_3.set_title('β Value Distribution (Boxplot)', fontsize=21, fontweight='bold')
         ax5_3.grid(True, alpha=0.3, axis='y')
         
         # 平均値を表示
@@ -1177,12 +1177,12 @@ def plot_beta_analysis(beta_stats: BetaStatistics, output_prefix: str = "beta_an
                          yerr=stds_non, label='Non-addicted',
                          color='#2ecc71', alpha=0.7, capsize=5)
         
-        ax5_4.set_xlabel('Phase', fontsize=16)
-        ax5_4.set_ylabel('Mean β Value', fontsize=16)
+        ax5_4.set_xlabel('Phase', fontsize=19)
+        ax5_4.set_ylabel('Mean β Value', fontsize=19)
         ax5_4.set_title('Average β by Phase: Addicted vs Non-addicted', 
-                   fontsize=18, fontweight='bold')
+                   fontsize=21, fontweight='bold')
         ax5_4.set_xticks(x_pos_phase)
-        ax5_4.set_xticklabels(phase_names)
+        ax5_4.set_xticklabels(phase_names, fontsize=22)
         ax5_4.set_ylim(0, 1)
         ax5_4.legend()
         ax5_4.grid(True, alpha=0.3, axis='y')
@@ -1208,8 +1208,8 @@ def plot_beta_analysis(beta_stats: BetaStatistics, output_prefix: str = "beta_an
         bp1['boxes'][1].set_facecolor('#2ecc71')
         bp1['boxes'][1].set_alpha(0.7)
         
-        ax6_1.set_ylabel('β Standard Deviation (per agent)', fontsize=16)
-        ax6_1.set_title('β Variability Comparison', fontsize=18, fontweight='bold')
+        ax6_1.set_ylabel('β Standard Deviation (per agent)', fontsize=19)
+        ax6_1.set_title('β Variability Comparison', fontsize=21, fontweight='bold')
         ax6_1.grid(True, alpha=0.3, axis='y')
         
         # 平均値を表示
@@ -1234,9 +1234,9 @@ def plot_beta_analysis(beta_stats: BetaStatistics, output_prefix: str = "beta_an
                   color='#e74c3c', density=True)
         ax6_2.hist(extreme_rates_non, bins=20, alpha=0.6, label='Non-addicted',
                   color='#2ecc71', density=True)
-        ax6_2.set_xlabel('Extreme Value Usage (%)', fontsize=16)
-        ax6_2.set_ylabel('Density', fontsize=16)
-        ax6_2.set_title('Extreme Strategy Usage Distribution', fontsize=18, fontweight='bold')
+        ax6_2.set_xlabel('Extreme Value Usage (%)', fontsize=19)
+        ax6_2.set_ylabel('Density', fontsize=19)
+        ax6_2.set_title('Extreme Strategy Usage Distribution', fontsize=21, fontweight='bold')
         ax6_2.legend()
         ax6_2.grid(True, alpha=0.3)
         ax6_2.axvline(np.mean(extreme_rates_add), color='#e74c3c', linestyle='--', linewidth=2)
@@ -1253,11 +1253,11 @@ def plot_beta_analysis(beta_stats: BetaStatistics, output_prefix: str = "beta_an
         colors_diff = ['#e74c3c' if d > 0 else '#2ecc71' for d in freq_diff]
         bars_diff = ax6_3.bar(range(len(BETA_VALUES)), freq_diff, color=colors_diff, alpha=0.7)
         ax6_3.axhline(0, color='black', linewidth=1)
-        ax6_3.set_xlabel('β Value', fontsize=16)
-        ax6_3.set_ylabel('Usage Difference (%)', fontsize=16)
-        ax6_3.set_title('β Usage: Addicted - Non-addicted', fontsize=18, fontweight='bold')
+        ax6_3.set_xlabel('β Value', fontsize=19)
+        ax6_3.set_ylabel('Usage Difference (%)', fontsize=19)
+        ax6_3.set_title('β Usage: Addicted - Non-addicted', fontsize=21, fontweight='bold')
         ax6_3.set_xticks(range(len(BETA_VALUES)))
-        ax6_3.set_xticklabels([f'{b:.1f}' for b in BETA_VALUES])
+        ax6_3.set_xticklabels([f'{b:.1f}' for b in BETA_VALUES], fontsize=22)
         ax6_3.grid(True, alpha=0.3, axis='y')
         
         # 値をバーに表示
@@ -1265,7 +1265,7 @@ def plot_beta_analysis(beta_stats: BetaStatistics, output_prefix: str = "beta_an
             height = bar.get_height()
             ax6_3.text(bar.get_x() + bar.get_width()/2, height,
                       f'{diff:+.1f}%', ha='center', 
-                      va='bottom' if height > 0 else 'top', fontsize=16)
+                      va='bottom' if height > 0 else 'top', fontsize=19)
         
         # (4) 時系列でのβ平均（依存群vs非依存群）
         ax6_4 = axes6[1, 0]
@@ -1293,9 +1293,9 @@ def plot_beta_analysis(beta_stats: BetaStatistics, output_prefix: str = "beta_an
         for boundary in phase_boundary:
             ax6_4.axvline(step_array[boundary], color='gray', linestyle='--', alpha=0.5)
         
-        ax6_4.set_xlabel('Step', fontsize=16)
-        ax6_4.set_ylabel('Mean β Value', fontsize=16)
-        ax6_4.set_title('β Dynamics: Addicted vs Non-addicted', fontsize=18, fontweight='bold')
+        ax6_4.set_xlabel('Step', fontsize=19)
+        ax6_4.set_ylabel('Mean β Value', fontsize=19)
+        ax6_4.set_title('β Dynamics: Addicted vs Non-addicted', fontsize=21, fontweight='bold')
         ax6_4.set_ylim(-0.05, 1.05)
         ax6_4.legend()
         ax6_4.grid(True, alpha=0.3)
@@ -1324,8 +1324,8 @@ def plot_beta_analysis(beta_stats: BetaStatistics, output_prefix: str = "beta_an
         bp2['boxes'][1].set_facecolor('#2ecc71')
         bp2['boxes'][1].set_alpha(0.7)
         
-        ax6_5.set_ylabel('Middle Values Usage (%)', fontsize=16)
-        ax6_5.set_title('Balanced Strategy Usage (β=0.2-0.8)', fontsize=18, fontweight='bold')
+        ax6_5.set_ylabel('Middle Values Usage (%)', fontsize=19)
+        ax6_5.set_title('Balanced Strategy Usage (β=0.2-0.8)', fontsize=21, fontweight='bold')
         ax6_5.grid(True, alpha=0.3, axis='y')
         
         # 平均値を表示
@@ -1360,16 +1360,16 @@ def plot_beta_analysis(beta_stats: BetaStatistics, output_prefix: str = "beta_an
         
         ax6_6.plot(bin_centers, addiction_rates_by_beta, 'o-', linewidth=2, markersize=8,
                   color='#9b59b6')
-        ax6_6.set_xlabel('Mean β Value (binned)', fontsize=16)
-        ax6_6.set_ylabel('Addiction Rate (%)', fontsize=16)
-        ax6_6.set_title('Addiction Rate by Mean β Value', fontsize=18, fontweight='bold')
+        ax6_6.set_xlabel('Mean β Value (binned)', fontsize=19)
+        ax6_6.set_ylabel('Addiction Rate (%)', fontsize=19)
+        ax6_6.set_title('Addiction Rate by Mean β Value', fontsize=21, fontweight='bold')
         ax6_6.grid(True, alpha=0.3)
         ax6_6.set_xlim(0, 1)
         
         # サンプル数を注釈
         for x, y, count in zip(bin_centers, addiction_rates_by_beta, bin_counts):
             ax6_6.annotate(f'n={count}', (x, y), textcoords='offset points',
-                          xytext=(0, 5), ha='center', fontsize=16, alpha=0.9)
+                          xytext=(0, 5), ha='center', fontsize=19, alpha=0.9)
         
         plt.tight_layout()
         plt.savefig(f"{output_prefix}_detailed_analysis.png", dpi=150, bbox_inches='tight')
@@ -1447,11 +1447,11 @@ def plot_beta_analysis(beta_stats: BetaStatistics, output_prefix: str = "beta_an
             ax7_1.axvline(step_array[boundary], color='gray', linestyle='--', 
                          linewidth=1.5, alpha=0.5)
         
-        ax7_1.set_ylabel('Usage Rate (%)', fontsize=16)
+        ax7_1.set_ylabel('Usage Rate (%)', fontsize=22)
         ax7_1.set_ylim(0, 26)
         ax7_1.set_title(f'Windowed β Usage: Addicted (n={n_addicted_agents} agents)', 
-                   fontsize=18, fontweight='bold')
-        ax7_1.legend(loc='best', fontsize=16, ncol=3)
+                   fontsize=21, fontweight='bold')
+        ax7_1.legend(loc='best', fontsize=19, ncol=3)
         ax7_1.grid(True, alpha=0.3)
         
         # Non-addicted群のプロット（下段）
@@ -1467,12 +1467,12 @@ def plot_beta_analysis(beta_stats: BetaStatistics, output_prefix: str = "beta_an
             ax7_2.axvline(step_array[boundary], color='gray', linestyle='--',
                          linewidth=1.5, alpha=0.5)
         
-        ax7_2.set_xlabel('Step (window center)', fontsize=16)
-        ax7_2.set_ylabel('Usage Rate (%)', fontsize=16)
+        ax7_2.set_xlabel('Step (window center)', fontsize=22)
+        ax7_2.set_ylabel('Usage Rate (%)', fontsize=22)
         ax7_2.set_ylim(0, 26)
         ax7_2.set_title(f'Windowed β Usage: Non-addicted (n={n_non_addicted_agents} agents)', 
-                   fontsize=18, fontweight='bold')
-        ax7_2.legend(loc='best', fontsize=16, ncol=3)
+                   fontsize=21, fontweight='bold')
+        ax7_2.legend(loc='best', fontsize=19, ncol=3)
         ax7_2.grid(True, alpha=0.3)
         
         plt.tight_layout()
@@ -1528,10 +1528,10 @@ def plot_beta_analysis(beta_stats: BetaStatistics, output_prefix: str = "beta_an
         ax8_1.hist(beta_switches_non_addicted, bins=bins_switches, alpha=0.6,
               label=f'Non-addicted (n={n_non_addicted})', color='#3498db', density=True)
         
-        ax8_1.set_xlabel('Number of β switches (all steps)', fontsize=16)
-        ax8_1.set_ylabel('Density', fontsize=16)
-        ax8_1.set_title('Distribution of β Switch Counts', fontsize=18, fontweight='bold')
-        ax8_1.legend(fontsize=16)
+        ax8_1.set_xlabel('Number of β switches (all steps)', fontsize=19)
+        ax8_1.set_ylabel('Density', fontsize=19)
+        ax8_1.set_title('Distribution of β Switch Counts', fontsize=21, fontweight='bold')
+        ax8_1.legend(fontsize=19)
         ax8_1.grid(True, alpha=0.3)
         
         # 平均値を垂直線で表示
@@ -1541,7 +1541,7 @@ def plot_beta_analysis(beta_stats: BetaStatistics, output_prefix: str = "beta_an
                  linewidth=2, label=f'Addicted mean: {mean_switches_add:.1f}')
         ax8_1.axvline(mean_switches_non, color='#3498db', linestyle='--',
                  linewidth=2, label=f'Non-addicted mean: {mean_switches_non:.1f}')
-        ax8_1.legend(fontsize=16)
+        ax8_1.legend(fontsize=19)
         
         # (2) β「飛び越し選択」の頻度（右図）
         ax8_2 = axes8[1]
@@ -1584,12 +1584,12 @@ def plot_beta_analysis(beta_stats: BetaStatistics, output_prefix: str = "beta_an
         bars_jump_non = ax8_2.bar(x_pos_jump + width_jump/2, jump_freq_non, width_jump,
                       label='Non-addicted', color='#3498db', alpha=0.7)
         
-        ax8_2.set_xlabel('β Switch Distance (index difference)', fontsize=16)
-        ax8_2.set_ylabel('Density', fontsize=16)
-        ax8_2.set_title('Frequency of β Jump Selections', fontsize=18, fontweight='bold')
+        ax8_2.set_xlabel('β Switch Distance (index difference)', fontsize=19)
+        ax8_2.set_ylabel('Density', fontsize=19)
+        ax8_2.set_title('Frequency of β Jump Selections', fontsize=21, fontweight='bold')
         ax8_2.set_xticks(x_pos_jump)
-        ax8_2.set_xticklabels(jump_labels, fontsize=16)
-        ax8_2.legend(fontsize=16)
+        ax8_2.set_xticklabels(jump_labels, fontsize=22)
+        ax8_2.legend(fontsize=19)
         ax8_2.grid(True, alpha=0.3, axis='y')
         
         # 各バーに値を表示
@@ -1598,7 +1598,7 @@ def plot_beta_analysis(beta_stats: BetaStatistics, output_prefix: str = "beta_an
                 height = bar.get_height()
                 if height > 0:
                     ax8_2.text(bar.get_x() + bar.get_width()/2, height,
-                              f'{height:.3f}', ha='center', va='bottom', fontsize=16)
+                              f'{height:.3f}', ha='center', va='bottom', fontsize=19)
         
         plt.tight_layout()
         plt.savefig(f"{output_prefix}_beta_switches_jumps.png", dpi=150, bbox_inches='tight')

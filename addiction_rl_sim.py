@@ -1528,7 +1528,7 @@ def plot_beta_analysis(beta_stats: BetaStatistics, output_prefix: str = "beta_an
                          linewidth=1.5, alpha=0.5)
         
         ax7_1.set_ylabel('Usage Rate (%)', fontsize=22)
-        
+            
         ax7_1.set_title(f'Windowed β Usage: Addicted (n={n_addicted_agents} agents)', 
                    fontsize=21, fontweight='bold')
         ax7_1.legend(loc='best', fontsize=19, ncol=3)
@@ -1549,6 +1549,7 @@ def plot_beta_analysis(beta_stats: BetaStatistics, output_prefix: str = "beta_an
         
         ax7_2.set_xlabel('Step (window center)', fontsize=22)
         ax7_2.set_ylabel('Usage Rate (%)', fontsize=22)
+        ax7_2.set_ylim(0, 80)
         
         ax7_2.set_title(f'Windowed β Usage: Non-addicted (n={n_non_addicted_agents} agents)', 
                    fontsize=21, fontweight='bold')

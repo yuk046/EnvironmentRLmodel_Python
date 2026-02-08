@@ -1529,7 +1529,7 @@ def plot_beta_analysis(beta_stats: BetaStatistics, output_prefix: str = "beta_an
                          linewidth=1.5, alpha=0.5)
         
         ax7_1.set_ylabel('Usage Rate (%)', fontsize=22)
-        ax7_1.set_ylim(0, 83)
+        ax7_1.set_ylim(0, 100)
         ax7_1.set_title(f'Windowed β Usage: Addicted (n={n_addicted_agents} agents)', 
                    fontsize=21, fontweight='bold')
         ax7_1.legend(loc='best', fontsize=19, ncol=3)
@@ -1550,7 +1550,7 @@ def plot_beta_analysis(beta_stats: BetaStatistics, output_prefix: str = "beta_an
         
         ax7_2.set_xlabel('Step (window center)', fontsize=22)
         ax7_2.set_ylabel('Usage Rate (%)', fontsize=22)
-        ax7_2.set_ylim(0, 83)
+        ax7_2.set_ylim(0, 100)
         
         ax7_2.set_title(f'Windowed β Usage: Non-addicted (n={n_non_addicted_agents} agents)', 
                    fontsize=21, fontweight='bold')
@@ -1610,20 +1610,22 @@ def plot_beta_analysis(beta_stats: BetaStatistics, output_prefix: str = "beta_an
         ax8_1.hist(beta_switches_non_addicted, bins=bins_switches, alpha=0.6,
               label=f'Non-addicted (n={n_non_addicted})', color='#3498db', density=True)
         
-        ax8_1.set_xlabel('Number of β switches (all steps)', fontsize=19)
-        ax8_1.set_ylabel('Density', fontsize=19)
-        ax8_1.set_title('Distribution of β Switch Counts', fontsize=21, fontweight='bold')
-        ax8_1.legend(fontsize=19)
+        ax8_1.set_xlabel('Number of β switches (all steps)', fontsize=13)
+        ax8_1.set_ylabel('Density', fontsize=13)
+        ax8_1.set_title('Distribution of β Switch Counts', fontsize=13, fontweight='bold')
+        ax8_1.legend(fontsize=13)
         ax8_1.grid(True, alpha=0.3)
+        ax8_1.tick_params(axis='both', labelsize=13)
+        ax8_1.set_xlim(0, 500)
         
         # 平均値を垂直線で表示
         mean_switches_add = np.mean(beta_switches_addicted)
         mean_switches_non = np.mean(beta_switches_non_addicted)
         ax8_1.axvline(mean_switches_add, color='#e74c3c', linestyle='--', 
-                 linewidth=2, label=f'Addicted mean: {mean_switches_add:.1f}')
+             linewidth=2, label=f'Addicted mean: {mean_switches_add:.1f}')
         ax8_1.axvline(mean_switches_non, color='#3498db', linestyle='--',
-                 linewidth=2, label=f'Non-addicted mean: {mean_switches_non:.1f}')
-        ax8_1.legend(fontsize=19)
+             linewidth=2, label=f'Non-addicted mean: {mean_switches_non:.1f}')
+        ax8_1.legend(fontsize=13)
         
         # (2) β「飛び越し選択」の頻度（右図）
         ax8_2 = axes8[1]
@@ -1665,14 +1667,20 @@ def plot_beta_analysis(beta_stats: BetaStatistics, output_prefix: str = "beta_an
                       label='Addicted', color='#e74c3c', alpha=0.7)
         bars_jump_non = ax8_2.bar(x_pos_jump + width_jump/2, jump_freq_non, width_jump,
                       label='Non-addicted', color='#3498db', alpha=0.7)
+
+        # Add a small headroom above the tallest bar so labels are not clipped
+        max_jump_height = max(jump_freq_add + jump_freq_non) if (jump_freq_add or jump_freq_non) else 0
+        if max_jump_height > 0:
+            ax8_2.set_ylim(0, max_jump_height * 1.1)
         
-        ax8_2.set_xlabel('β Switch Distance (index difference)', fontsize=19)
-        ax8_2.set_ylabel('Density', fontsize=19)
-        ax8_2.set_title('Frequency of β Jump Selections', fontsize=21, fontweight='bold')
+        ax8_2.set_xlabel('β Switch Distance (index difference)', fontsize=13)
+        ax8_2.set_ylabel('Proportion', fontsize=13)
+        ax8_2.set_title('Frequency of β Jump Selections', fontsize=13, fontweight='bold')
         ax8_2.set_xticks(x_pos_jump)
-        ax8_2.set_xticklabels(jump_labels, fontsize=22)
-        ax8_2.legend(fontsize=19)
+        ax8_2.set_xticklabels(jump_labels, fontsize=13)
+        ax8_2.legend(fontsize=13)
         ax8_2.grid(True, alpha=0.3, axis='y')
+        ax8_2.tick_params(axis='both', labelsize=13)
         
         # 各バーに値を表示
         for bars in [bars_jump_add, bars_jump_non]:
@@ -1680,7 +1688,7 @@ def plot_beta_analysis(beta_stats: BetaStatistics, output_prefix: str = "beta_an
                 height = bar.get_height()
                 if height > 0:
                     ax8_2.text(bar.get_x() + bar.get_width()/2, height,
-                              f'{height:.3f}', ha='center', va='bottom', fontsize=19)
+                              f'{height:.3f}', ha='center', va='bottom', fontsize=13)
         
         plt.tight_layout()
         plt.savefig(f"{output_prefix}_beta_switches_jumps.png", dpi=150, bbox_inches='tight')

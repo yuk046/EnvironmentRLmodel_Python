@@ -436,7 +436,8 @@ class AdaptiveBetaAgent:
                 # Reduce random beta exploration to stabilize around learned beta
                 self.epsilon_beta_local = max(0.02, EPSILON_BETA * 0.3)
                 # Small prior favoring mid-range betas for stability under volatility
-                self.q_beta = np.array([0.0, 0.08, 0.12, 0.12, 0.08, 0.0], dtype=np.float64)
+                # self.q_beta = np.array([0.0, 0.08, 0.12, 0.12, 0.08, 0.0], dtype=np.float64)
+                self.q_beta = np.array([0.0, 0.0, 0.0, 0.0, 0.0, 0.0], dtype=np.float64)
         
         self.model_counts = np.zeros((NUM_STATES, NUM_ACTIONS, NUM_STATES), dtype=np.float64)
         self.model_rewards = np.zeros((NUM_STATES, NUM_ACTIONS, NUM_STATES), dtype=np.float64)
@@ -665,13 +666,13 @@ def run_single_agent(
             # Safe pre-training: no addictive reward, penalties remain
             env.config.goal_reward = R_G
             env.config.drug_reward = 0.0
-            env.config.aftereffect_penalty = -1.2
+            env.config.aftereffect_penalty = -0.3
             env.config.shock_penalty = R_P
             env.config.goal_is_better = True
         elif phase_idx == 1:
             # High-reward/high-risk: strong addictive reward, penalties stay
             env.config.goal_reward = R_G
-            env.config.drug_reward = 12.0
+            env.config.drug_reward = 10.0
             env.config.aftereffect_penalty = -1.2
             env.config.shock_penalty = R_P
             env.config.goal_is_better = False
@@ -1269,7 +1270,7 @@ def main():
     parser = argparse.ArgumentParser(description='Large-scale volatility experiment')
     parser.add_argument('--num-agents', type=int, default=1000, 
                        help='Number of agents per condition per run')
-    parser.add_argument('--num-steps', type=int, default=8000,
+    parser.add_argument('--num-steps', type=int, default=9050,
                        help='Number of steps per agent')
     parser.add_argument('--num-runs', type=int, default=1,
                        help='Number of runs with different seeds')
